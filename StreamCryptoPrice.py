@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set
 
 import aiofiles
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 import websockets
 import logging
@@ -88,6 +88,9 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
         response = s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=key)
         object_exists = True
         remote_size = response.get("ContentLength", 0)
+    except NoCredentialsError as exc:
+        logger.error("AWS credentials unavailable when accessing %s: %s", key, exc)
+        return False
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code")
         if error_code in ("404", "NoSuchKey"):
@@ -138,6 +141,15 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
                 temp_path.unlink(missing_ok=True)
             except Exception as cleanup_exc:
                 logger.warning("Failed to cleanup temp file %s: %s", temp_path, cleanup_exc)
+    except NoCredentialsError as exc:
+        logger.error(
+            "AWS credentials unavailable when uploading %s to s3://%s/%s: %s",
+            file_path,
+            S3_BUCKET_NAME,
+            key,
+            exc,
+        )
+        return False
     except Exception as exc:
         logger.error("Error uploading %s to S3: %s", file_path, exc)
         return False
