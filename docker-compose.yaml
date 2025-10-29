@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - .env
     container_name: poly_punting
     volumes:
       - poly_punting_data:/app/data

@@ -10,6 +10,7 @@ import aiofiles
 import boto3
 import requests
 import websockets
+import logging
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -18,7 +19,34 @@ DATA_OUTPUT_ROOT = Path("data")
 CONTRACT_OUTPUT_ROOT = DATA_OUTPUT_ROOT / "contracts"
 S3_BUCKET_NAME = os.getenv("S3_TARGET_BUCKET", "poly-punting-raw")
 
-s3_client = boto3.client("s3")
+
+def _build_s3_client() -> boto3.client:
+    """Initialise an S3 client honouring explicit env credentials when provided."""
+    session_kwargs = {}
+
+    access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    session_token = os.getenv("AWS_SESSION_TOKEN")
+    region = os.getenv("AWS_REGION")
+
+    if access_key and secret_key:
+        session_kwargs["aws_access_key_id"] = access_key
+        session_kwargs["aws_secret_access_key"] = secret_key
+        if session_token:
+            session_kwargs["aws_session_token"] = session_token
+
+    if region:
+        session_kwargs["region_name"] = region
+
+    return boto3.client("s3", **session_kwargs)
+
+
+s3_client = _build_s3_client()
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("poly_punting")
 
 ASSET_CONFIGS: Dict[str, Dict[str, str]] = {
     "btc": {"keyword": "btc", "tag_id": DEFAULT_MARKET_TAG},
@@ -38,20 +66,20 @@ def _default_object_key(file_path: Path) -> str:
 
 def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
     if not S3_BUCKET_NAME:
-        print("S3 bucket name is not configured; skipping upload.")
+        logger.warning("S3 bucket name is not configured; skipping upload.")
         return False
 
     if not file_path.exists():
-        print(f"File not found, skipping S3 upload: {file_path}")
+        logger.warning("File not found, skipping S3 upload: %s", file_path)
         return False
 
     key = object_key or _default_object_key(file_path)
     try:
         s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
-        print(f"Uploaded {file_path} to s3://{S3_BUCKET_NAME}/{key}")
+        logger.info("Uploaded %s to s3://%s/%s", file_path, S3_BUCKET_NAME, key)
         return True
     except Exception as exc:
-        print(f"Error uploading {file_path} to S3: {exc}")
+        logger.error("Error uploading %s to S3: %s", file_path, exc)
         return False
 
 
@@ -190,7 +218,7 @@ async def populate_market_queue(
                 fetch_events, config.get("tag_id"), "false"
             )
         except Exception as exc:
-            print(f"Failed to fetch events for {asset_name}: {exc}")
+            logger.error("Failed to fetch events for %s: %s", asset_name, exc)
             await asyncio.sleep(refresh_interval)
             continue
 
@@ -245,7 +273,7 @@ async def stream_single_market(
                         try:
                             payload = json.loads(message)
                         except json.JSONDecodeError:
-                            print(f"Non-JSON payload for market {market.slug}: {message}")
+                            logger.warning("Non-JSON payload for market %s: %s", market.slug, message)
                             continue
 
                         await handle.write(json.dumps(payload) + "\n")
@@ -256,10 +284,10 @@ async def stream_single_market(
 
                 return
         except websockets.ConnectionClosed as exc:
-            print(f"Connection closed for market {market.slug}: {exc}; retrying in 2s")
+            logger.warning("Connection closed for market %s: %s; retrying in 2s", market.slug, exc)
             await asyncio.sleep(2)
         except Exception as exc:
-            print(f"Error streaming market {market.slug}: {exc}; retrying in 5s")
+            logger.error("Error streaming market %s: %s; retrying in 5s", market.slug, exc)
             await asyncio.sleep(5)
 
 
@@ -276,7 +304,7 @@ async def stream_markets_for_asset(
         except asyncio.TimeoutError:
             continue
 
-        print(f"Streaming {asset_name.upper()} market: {market.slug}")
+        logger.info("Streaming %s market: %s", asset_name.upper(), market.slug)
         try:
             await stream_single_market(
                 market, stop_event, inactivity_timeout=inactivity_timeout
@@ -317,22 +345,22 @@ async def stream_chainlink_data(queue: asyncio.Queue, stop_event: asyncio.Event)
                         d = json.loads(m)
                         await queue.put(d)
                     except json.JSONDecodeError:
-                        print("Received non-JSON message:", m)
+                        logger.warning("Received non-JSON message on chainlink feed: %s", m)
                         continue
 
                     if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
                         await websocket.ping()
                         last_time_ping = dt.datetime.now()
-                        print("PINGING")
+                        logger.debug("PINGING chainlink websocket")
         except websockets.ConnectionClosed as exc:
             if stop_event.is_set():
                 return
-            print(f"Chainlink websocket closed: {exc}; reconnecting in 2s")
+            logger.warning("Chainlink websocket closed: %s; reconnecting in 2s", exc)
             await asyncio.sleep(2)
         except Exception as exc:
             if stop_event.is_set():
                 return
-            print(f"Chainlink websocket error: {exc}; retrying in 5s")
+            logger.error("Chainlink websocket error: %s; retrying in 5s", exc)
             await asyncio.sleep(5)
 
 
@@ -393,22 +421,22 @@ async def stream_binance_data(queue: asyncio.Queue, stop_event: asyncio.Event):
                         d = json.loads(m)
                         await queue.put(d)
                     except json.JSONDecodeError:
-                        print("Received non-JSON message:", m)
+                        logger.warning("Received non-JSON message on binance feed: %s", m)
                         continue
 
                     if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
                         await websocket.ping()
                         last_time_ping = dt.datetime.now()
-                        print("PINGING")
+                        logger.debug("PINGING binance websocket")
         except websockets.ConnectionClosed as exc:
             if stop_event.is_set():
                 return
-            print(f"Binance websocket closed: {exc}; reconnecting in 2s")
+            logger.warning("Binance websocket closed: %s; reconnecting in 2s", exc)
             await asyncio.sleep(2)
         except Exception as exc:
             if stop_event.is_set():
                 return
-            print(f"Binance websocket error: {exc}; retrying in 5s")
+            logger.error("Binance websocket error: %s; retrying in 5s", exc)
             await asyncio.sleep(5)
 
 async def main():
@@ -457,7 +485,7 @@ async def main():
         # Wait for all tasks to complete (they probably run forever)
         await asyncio.gather(*all_tasks)
     except asyncio.CancelledError:
-        print("Tasks cancelled, shutting down...")
+        logger.info("Tasks cancelled, shutting down...")
     finally:
         # Set stop_event to signal tasks to exit
         stop_event.set()
