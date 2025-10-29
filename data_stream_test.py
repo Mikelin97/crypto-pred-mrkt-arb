@@ -111,13 +111,14 @@ if __name__ == "__main__":
     binary_15m_events = get_all_events(tag_id=tag_15m_markets)
 
     asset1, asset2 = json.loads(binary_15m_events[1]['markets'][0]['clobTokenIds']) 
+    filename = binary_15m_events[1]['markets'][0]['slug']
 
     print(f"Asset 1 Token ID: {asset1}")
     print(f"Asset 2 Token ID: {asset2}")
 
 
     try:
-        asyncio.run(subscribe([asset1]))
+        asyncio.run(subscribe([asset1], file_path=f'data/{filename}.json'))
     except KeyboardInterrupt:
         print("Keyboard interrupt received; subscription stopped.")
 

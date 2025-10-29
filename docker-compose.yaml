@@ -1,0 +1,16 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: poly_punting
+    volumes:
+      - poly_punting_data:/app/data
+    networks:
+      - poly_punting_network
+    restart: unless-stopped
+networks:
+  poly_punting_network:
+    driver: bridge
+volumes:
+  poly_punting_data:
