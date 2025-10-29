@@ -2,12 +2,15 @@ import datetime as dt
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import aiofiles
 import boto3
+from botocore.exceptions import ClientError
 import requests
 import websockets
 import logging
@@ -74,10 +77,67 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
         return False
 
     key = object_key or _default_object_key(file_path)
+    local_size = file_path.stat().st_size
+    if local_size == 0:
+        logger.info("Local file %s is empty; skipping upload.", file_path)
+        return False
+
+    object_exists = False
+    remote_size = 0
     try:
-        s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
-        logger.info("Uploaded %s to s3://%s/%s", file_path, S3_BUCKET_NAME, key)
-        return True
+        response = s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=key)
+        object_exists = True
+        remote_size = response.get("ContentLength", 0)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        if error_code in ("404", "NoSuchKey"):
+            object_exists = False
+        else:
+            logger.error("Failed to check existing object for %s: %s", key, exc)
+            return False
+
+    try:
+        if not object_exists:
+            s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
+            logger.info("Uploaded %s to s3://%s/%s", file_path, S3_BUCKET_NAME, key)
+            return True
+
+        if local_size >= remote_size:
+            s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
+            logger.info(
+                "Replaced existing object with local superset for %s (local=%s, remote=%s)",
+                key,
+                local_size,
+                remote_size,
+            )
+            return True
+
+        # Merge existing remote content with new local data.
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+
+        try:
+            with temp_path.open("wb") as output:
+                s3_client.download_fileobj(S3_BUCKET_NAME, key, output)
+
+            with temp_path.open("ab") as merged, file_path.open("rb") as local_file:
+                shutil.copyfileobj(local_file, merged)
+
+            s3_client.upload_file(str(temp_path), S3_BUCKET_NAME, key)
+            logger.info(
+                "Appended %s bytes from %s to existing object %s (remote=%s, local=%s)",
+                local_size,
+                file_path,
+                key,
+                remote_size,
+                local_size,
+            )
+            return True
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception as cleanup_exc:
+                logger.warning("Failed to cleanup temp file %s: %s", temp_path, cleanup_exc)
     except Exception as exc:
         logger.error("Error uploading %s to S3: %s", file_path, exc)
         return False
@@ -249,7 +309,7 @@ async def stream_single_market(
                 )
 
                 market.file_path.parent.mkdir(parents=True, exist_ok=True)
-                async with aiofiles.open(market.file_path, "w") as handle:
+                async with aiofiles.open(market.file_path, "a") as handle:
                     last_ping = dt.datetime.now()
                     last_flush = dt.datetime.now()
 
