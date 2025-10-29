@@ -1,24 +1,77 @@
 import datetime as dt
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import aiofiles
+import boto3
 import requests
 import websockets
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 DEFAULT_MARKET_TAG = "102467"  # 15 minute recurring markets
-CONTRACT_OUTPUT_ROOT = Path("data/contracts")
+DATA_OUTPUT_ROOT = Path("data")
+CONTRACT_OUTPUT_ROOT = DATA_OUTPUT_ROOT / "contracts"
+S3_BUCKET_NAME = os.getenv("S3_TARGET_BUCKET", "poly-punting-raw")
+
+s3_client = boto3.client("s3")
 
 ASSET_CONFIGS: Dict[str, Dict[str, str]] = {
     "btc": {"keyword": "btc", "tag_id": DEFAULT_MARKET_TAG},
     "eth": {"keyword": "eth", "tag_id": DEFAULT_MARKET_TAG},
     "xrp": {"keyword": "xrp", "tag_id": DEFAULT_MARKET_TAG},
 }
+
+
+def _default_object_key(file_path: Path) -> str:
+    """Build an S3 object key using the path relative to the data directory."""
+    try:
+        relative = file_path.relative_to(DATA_OUTPUT_ROOT)
+        return str(relative)
+    except ValueError:
+        return file_path.name
+
+
+def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
+    if not S3_BUCKET_NAME:
+        print("S3 bucket name is not configured; skipping upload.")
+        return False
+
+    if not file_path.exists():
+        print(f"File not found, skipping S3 upload: {file_path}")
+        return False
+
+    key = object_key or _default_object_key(file_path)
+    try:
+        s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
+        print(f"Uploaded {file_path} to s3://{S3_BUCKET_NAME}/{key}")
+        return True
+    except Exception as exc:
+        print(f"Error uploading {file_path} to S3: {exc}")
+        return False
+
+
+async def upload_file_to_s3(file_path: Path, object_key: Optional[str] = None) -> bool:
+    """Async wrapper for uploading a single file to S3."""
+    if not S3_BUCKET_NAME:
+        return False
+    return await asyncio.to_thread(_upload_file_to_s3_sync, file_path, object_key)
+
+
+async def upload_price_stream_snapshots() -> None:
+    """Upload the latest chainlink/binance price stream files to S3 if they exist."""
+    if not S3_BUCKET_NAME:
+        return
+
+    today = dt.datetime.now(dt.timezone.utc).date()
+    for prefix in ("chainlink_crypto_prices", "binance_crypto_prices"):
+        file_path = DATA_OUTPUT_ROOT / f"{prefix}_{today}.jsonl"
+        if file_path.exists():
+            await upload_file_to_s3(file_path)
 
 
 @dataclass
@@ -228,6 +281,9 @@ async def stream_markets_for_asset(
             await stream_single_market(
                 market, stop_event, inactivity_timeout=inactivity_timeout
             )
+            if not stop_event.is_set():
+                await upload_file_to_s3(market.file_path)
+                await upload_price_stream_snapshots()
         finally:
             queue.task_done()
 
@@ -246,34 +302,45 @@ async def stream_chainlink_data(queue: asyncio.Queue, stop_event: asyncio.Event)
             }
         ]
         }
-    async with websockets.connect(url) as websocket:
-        await websocket.send(json.dumps(subscribe_message))
+    while not stop_event.is_set():
+        try:
+            async with websockets.connect(url) as websocket:
+                await websocket.send(json.dumps(subscribe_message))
 
-        # while True:
-        while not stop_event.is_set():
-            try:
-                m = await asyncio.wait_for(websocket.recv(), timeout=10)
-            except asyncio.TimeoutError:
-                continue
-  
-            try:
-                d = json.loads(m)
-                await queue.put(d)
-            except json.JSONDecodeError:
-                print("Received non-JSON message:", m)
-                continue
+                while not stop_event.is_set():
+                    try:
+                        m = await asyncio.wait_for(websocket.recv(), timeout=10)
+                    except asyncio.TimeoutError:
+                        continue
 
-            if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
-                await websocket.ping()
-                last_time_ping = dt.datetime.now()
-                print("PINGING")
+                    try:
+                        d = json.loads(m)
+                        await queue.put(d)
+                    except json.JSONDecodeError:
+                        print("Received non-JSON message:", m)
+                        continue
+
+                    if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
+                        await websocket.ping()
+                        last_time_ping = dt.datetime.now()
+                        print("PINGING")
+        except websockets.ConnectionClosed as exc:
+            if stop_event.is_set():
+                return
+            print(f"Chainlink websocket closed: {exc}; reconnecting in 2s")
+            await asyncio.sleep(2)
+        except Exception as exc:
+            if stop_event.is_set():
+                return
+            print(f"Chainlink websocket error: {exc}; retrying in 5s")
+            await asyncio.sleep(5)
 
 
 async def file_writer(queue: asyncio.Queue, stop_event: asyncio.Event, base_name: str):
     current_date = dt.datetime.now(dt.timezone.utc).date()
 
     while not stop_event.is_set():
-        filename = Path(f"{base_name}_{current_date}.jsonl")
+        filename = DATA_OUTPUT_ROOT / f"{base_name}_{current_date}.jsonl"
         filename.parent.mkdir(parents=True, exist_ok=True)
 
         async with aiofiles.open(filename, "a") as f:
@@ -311,30 +378,42 @@ async def stream_binance_data(queue: asyncio.Queue, stop_event: asyncio.Event):
             }
         ]
     }
-    async with websockets.connect(url) as websocket:
-        await websocket.send(json.dumps(subscribe_message))
+    while not stop_event.is_set():
+        try:
+            async with websockets.connect(url) as websocket:
+                await websocket.send(json.dumps(subscribe_message))
 
-        # while True:
-        while not stop_event.is_set():
-            try:
-                m = await asyncio.wait_for(websocket.recv(), timeout=10)
-            except asyncio.TimeoutError:
-                continue
-  
-            try:
-                d = json.loads(m)
-                await queue.put(d)
-            except json.JSONDecodeError:
-                print("Received non-JSON message:", m)
-                continue
+                while not stop_event.is_set():
+                    try:
+                        m = await asyncio.wait_for(websocket.recv(), timeout=10)
+                    except asyncio.TimeoutError:
+                        continue
 
-            if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
-                await websocket.ping()
-                last_time_ping = dt.datetime.now()
-                print("PINGING")
+                    try:
+                        d = json.loads(m)
+                        await queue.put(d)
+                    except json.JSONDecodeError:
+                        print("Received non-JSON message:", m)
+                        continue
+
+                    if last_time_ping + dt.timedelta(seconds=10) < dt.datetime.now():
+                        await websocket.ping()
+                        last_time_ping = dt.datetime.now()
+                        print("PINGING")
+        except websockets.ConnectionClosed as exc:
+            if stop_event.is_set():
+                return
+            print(f"Binance websocket closed: {exc}; reconnecting in 2s")
+            await asyncio.sleep(2)
+        except Exception as exc:
+            if stop_event.is_set():
+                return
+            print(f"Binance websocket error: {exc}; retrying in 5s")
+            await asyncio.sleep(5)
 
 async def main():
     stop_event = asyncio.Event()
+    DATA_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     CONTRACT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     
     # Queues for streaming data
