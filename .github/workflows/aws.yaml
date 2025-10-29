@@ -12,6 +12,7 @@ env:
   ECS_CLUSTER: poly-punting-cluster
   ECS_TASK_DEFINITION: poly-punting-task
   CONTAINER_NAME: poly-punting
+  S3_TARGET_BUCKET: poly-punting-raw
 
 jobs:
   build-and-push:
@@ -96,6 +97,11 @@ jobs:
           task-definition: task-definition.json
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ needs.build-and-push.outputs.image-uri }}
+          environment-variables: |
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_REGION=${{ env.AWS_REGION }}
+            S3_TARGET_BUCKET=${{ env.S3_TARGET_BUCKET }}
 
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
