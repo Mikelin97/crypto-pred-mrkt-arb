@@ -89,29 +89,6 @@ jobs:
             --query taskDefinition \
             --output json > task-definition.json
 
-      - name: Sanitize task definition
-        run: |
-          jq '
-            .containerDefinitions |= map(del(.enableFaultInjection)) |
-            del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy,
-              .deregisteredAt,
-              .taskDefinitionTags,
-              .runtimePlatform,
-              .ipcMode,
-              .pidMode,
-              .proxyConfiguration,
-              .inferenceAccelerators,
-              .ephemeralStorage
-            )' task-definition.json > task-definition-clean.json
-          mv task-definition-clean.json task-definition.json
-
       - name: Fill in the new image ID in the ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
