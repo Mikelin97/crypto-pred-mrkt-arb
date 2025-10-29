@@ -1,8 +1,6 @@
 name: Deploy to AWS ECS
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -93,23 +91,25 @@ jobs:
 
       - name: Sanitize task definition
         run: |
-          jq 'del(.taskDefinitionArn,
-                  .revision,
-                  .status,
-                  .requiresAttributes,
-                  .compatibilities,
-                  .registeredAt,
-                  .registeredBy,
-                  .deregisteredAt,
-                  .taskDefinitionTags,
-                  .runtimePlatform,
-                  .ipcMode,
-                  .pidMode,
-                  .proxyConfiguration,
-                  .inferenceAccelerators,
-                  .ephemeralStorage,
-                  .containerDefinitions[].enableFaultInjection)' \
-            task-definition.json > task-definition-clean.json
+          jq '
+            .containerDefinitions |= map(del(.enableFaultInjection)) |
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy,
+              .deregisteredAt,
+              .taskDefinitionTags,
+              .runtimePlatform,
+              .ipcMode,
+              .pidMode,
+              .proxyConfiguration,
+              .inferenceAccelerators,
+              .ephemeralStorage
+            )' task-definition.json > task-definition-clean.json
           mv task-definition-clean.json task-definition.json
 
       - name: Fill in the new image ID in the ECS task definition
