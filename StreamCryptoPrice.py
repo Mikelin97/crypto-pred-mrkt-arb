@@ -55,6 +55,7 @@ ASSET_CONFIGS: Dict[str, Dict[str, str]] = {
     "btc": {"keyword": "btc", "tag_id": DEFAULT_MARKET_TAG},
     "eth": {"keyword": "eth", "tag_id": DEFAULT_MARKET_TAG},
     "xrp": {"keyword": "xrp", "tag_id": DEFAULT_MARKET_TAG},
+    "sol": {"keyword": "sol", "tag_id": DEFAULT_MARKET_TAG},
 }
 
 
