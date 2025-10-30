@@ -198,7 +198,7 @@ async def upload_price_stream_snapshots() -> None:
     for prefix in ("chainlink_crypto_prices", "binance_crypto_prices"):
         file_path = DATA_OUTPUT_ROOT / f"{prefix}_{today}.jsonl"
         if file_path.exists():
-            await upload_file_to_s3(file_path)
+            await upload_file_to_s3(file_path, truncate_local=True)
 
 
 @dataclass
