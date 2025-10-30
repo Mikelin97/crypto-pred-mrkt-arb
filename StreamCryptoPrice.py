@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 import websockets
 import logging
+import time
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -21,6 +22,8 @@ DEFAULT_MARKET_TAG = "102467"  # 15 minute recurring markets
 DATA_OUTPUT_ROOT = Path("data")
 CONTRACT_OUTPUT_ROOT = DATA_OUTPUT_ROOT / "contracts"
 S3_BUCKET_NAME = os.getenv("S3_TARGET_BUCKET", "poly-punting-raw")
+MARKET_DURATION_SECONDS = int(os.getenv("MARKET_DURATION_SECONDS", 15 * 60))
+MARKET_START_LEAD_SECONDS = int(os.getenv("MARKET_START_LEAD_SECONDS", 0))
 
 
 def _build_s3_client() -> boto3.client:
@@ -268,6 +271,22 @@ def collect_markets_for_asset(
     return collected
 
 
+def _classify_market_window(market: MarketDescriptor) -> str:
+    """Return whether a market is 'future', 'active', or 'expired'."""
+    if market.timestamp is None:
+        return "active"
+
+    now_ts = time.time()
+    start_ts = market.timestamp - MARKET_START_LEAD_SECONDS
+    end_ts = market.timestamp + MARKET_DURATION_SECONDS
+
+    if now_ts < start_ts:
+        return "future"
+    if now_ts > end_ts:
+        return "expired"
+    return "active"
+
+
 async def populate_market_queue(
     asset_name: str,
     config: Dict[str, str],
@@ -375,6 +394,25 @@ async def stream_markets_for_asset(
         try:
             market: MarketDescriptor = await asyncio.wait_for(queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
+            continue
+
+        status = _classify_market_window(market)
+        if status == "future":
+            wait_seconds = max(market.timestamp - MARKET_START_LEAD_SECONDS - time.time(), 0)
+            logger.debug(
+                "Market %s not yet active (starts in %.1fs); requeueing.",
+                market.slug,
+                wait_seconds,
+            )
+            queue.task_done()
+            if wait_seconds > 0:
+                await asyncio.sleep(min(wait_seconds, 60))
+            await queue.put(market)
+            continue
+
+        if status == "expired":
+            logger.info("Skipping expired market %s", market.slug)
+            queue.task_done()
             continue
 
         logger.info("Streaming %s market: %s", asset_name.upper(), market.slug)
