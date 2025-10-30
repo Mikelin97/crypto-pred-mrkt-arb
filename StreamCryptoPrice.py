@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Set
 
 import aiofiles
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 import websockets
@@ -22,6 +23,7 @@ DEFAULT_MARKET_TAG = "102467"  # 15 minute recurring markets
 DATA_OUTPUT_ROOT = Path("data")
 CONTRACT_OUTPUT_ROOT = DATA_OUTPUT_ROOT / "contracts"
 S3_BUCKET_NAME = os.getenv("S3_TARGET_BUCKET", "poly-punting-raw")
+S3_MAX_POOL_CONNECTIONS = int(os.getenv("S3_MAX_POOL_CONNECTIONS", "50"))
 MARKET_DURATION_SECONDS = int(os.getenv("MARKET_DURATION_SECONDS", 15 * 60))
 MARKET_START_LEAD_SECONDS = int(os.getenv("MARKET_START_LEAD_SECONDS", 0))
 
@@ -44,7 +46,8 @@ def _build_s3_client() -> boto3.client:
     if region:
         session_kwargs["region_name"] = region
 
-    return boto3.client("s3", **session_kwargs)
+    config = Config(max_pool_connections=S3_MAX_POOL_CONNECTIONS)
+    return boto3.client("s3", config=config, **session_kwargs)
 
 
 s3_client = _build_s3_client()
