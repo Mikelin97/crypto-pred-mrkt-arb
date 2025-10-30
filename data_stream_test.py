@@ -75,10 +75,6 @@ async def subscribe(asset_ids, file_path: str = 'data_stream.json', inactivity_t
                     print(f"Websocket connection closed: {exc}")
                     break
 
-                if message == "PONG":
-                    last_time_pong = dt.datetime.now()
-                    continue
-
                 last_time_pong = dt.datetime.now()
 
                 try:
