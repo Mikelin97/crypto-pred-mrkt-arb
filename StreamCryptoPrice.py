@@ -74,7 +74,9 @@ def _default_object_key(file_path: Path) -> str:
         return file_path.name
 
 
-def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
+def _upload_file_to_s3_sync(
+    file_path: Path, object_key: Optional[str], truncate_local: bool = False
+) -> bool:
     if not S3_BUCKET_NAME:
         logger.warning("S3 bucket name is not configured; skipping upload.")
         return False
@@ -106,10 +108,13 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
             logger.error("Failed to check existing object for %s: %s", key, exc)
             return False
 
+    success = False
+    temp_path: Optional[Path] = None
     try:
         if not object_exists:
             s3_client.upload_file(str(file_path), S3_BUCKET_NAME, key)
             logger.info("Uploaded %s to s3://%s/%s", file_path, S3_BUCKET_NAME, key)
+            success = True
             return True
 
         if local_size >= remote_size:
@@ -120,6 +125,7 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
                 local_size,
                 remote_size,
             )
+            success = True
             return True
 
         # Merge existing remote content with new local data.
@@ -142,12 +148,16 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
                 remote_size,
                 local_size,
             )
+            success = True
             return True
         finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except Exception as cleanup_exc:
-                logger.warning("Failed to cleanup temp file %s: %s", temp_path, cleanup_exc)
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to cleanup temp file %s: %s", temp_path, cleanup_exc
+                    )
     except NoCredentialsError as exc:
         logger.error(
             "AWS credentials unavailable when uploading %s to s3://%s/%s: %s",
@@ -160,13 +170,23 @@ def _upload_file_to_s3_sync(file_path: Path, object_key: Optional[str]) -> bool:
     except Exception as exc:
         logger.error("Error uploading %s to S3: %s", file_path, exc)
         return False
+    finally:
+        if success and truncate_local:
+            try:
+                file_path.write_text("")
+            except Exception as exc:
+                logger.warning("Failed to reset local file %s: %s", file_path, exc)
 
 
-async def upload_file_to_s3(file_path: Path, object_key: Optional[str] = None) -> bool:
+async def upload_file_to_s3(
+    file_path: Path, object_key: Optional[str] = None, truncate_local: bool = False
+) -> bool:
     """Async wrapper for uploading a single file to S3."""
     if not S3_BUCKET_NAME:
         return False
-    return await asyncio.to_thread(_upload_file_to_s3_sync, file_path, object_key)
+    return await asyncio.to_thread(
+        _upload_file_to_s3_sync, file_path, object_key, truncate_local
+    )
 
 
 async def upload_price_stream_snapshots() -> None:
@@ -424,8 +444,11 @@ async def stream_markets_for_asset(
                 market, stop_event, inactivity_timeout=inactivity_timeout
             )
             if not stop_event.is_set():
-                await upload_file_to_s3(market.file_path)
-                await upload_price_stream_snapshots()
+                
+                await upload_file_to_s3(market.file_path, truncate_local=True)
+                if asset_name.lower() == "btc":
+                    await upload_price_stream_snapshots()
+                
         finally:
             queue.task_done()
 
