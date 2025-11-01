@@ -502,9 +502,8 @@ async def stream_chainlink_data(queue: asyncio.Queue, stop_event: asyncio.Event)
 
 
 async def file_writer(queue: asyncio.Queue, stop_event: asyncio.Event, base_name: str):
-    current_date = dt.datetime.now(dt.timezone.utc).date()
-
     while not stop_event.is_set():
+        current_date = dt.datetime.now(dt.timezone.utc).date()
         filename = DATA_OUTPUT_ROOT / f"{base_name}_{current_date}.jsonl"
         filename.parent.mkdir(parents=True, exist_ok=True)
 
