@@ -59,7 +59,6 @@ def backtest_market(crypto_data_filepath, crypto_data_filename, crypto_symbol,
         # trade_queue = deque(trades_yes_perspective)  # TODO -> add trade data?
 
         warm_up_start_time = unix_start_time - warm_up_duration
-        order_book = OrderBook()
 
         warm_up_data = []
         backtest_data = []
@@ -98,9 +97,8 @@ def backtest_market(crypto_data_filepath, crypto_data_filename, crypto_symbol,
             while market_update_queue[0]['timestamp'] == next_timestamp:
                 market_update = market_update_queue.popleft()
                 market_updates.append(market_update)
-            order_book.batch_update(market_updates)
 
-            strategy.on_warmup(next_timestamp, latest_crypto_price, order_book)
+            strategy.on_warmup(next_timestamp, latest_crypto_price, market_updates)
             warm_up_data.append({
                     "timestamp": next_timestamp,
                     **strategy.get_state()
@@ -135,9 +133,8 @@ def backtest_market(crypto_data_filepath, crypto_data_filename, crypto_symbol,
             while market_update_queue[0]['timestamp'] == next_timestamp:
                 market_update = market_update_queue.popleft()
                 market_updates.append(market_update)
-            order_book.batch_update(market_updates)
 
-            strategy.on_update(next_timestamp, latest_crypto_price, order_book)
+            strategy.on_update(next_timestamp, latest_crypto_price, market_updates)
             backtest_data.append({
                     "timestamp": next_timestamp,
                     **strategy.get_state()
