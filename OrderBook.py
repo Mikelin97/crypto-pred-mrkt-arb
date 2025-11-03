@@ -8,7 +8,7 @@ class OrderBook:
         self.asks = SortedDict() # lowest asks are top (front) of book
         self.updated_at: str = "0" # UNIX TIMESTAMP
 
-    def update(self, side, price, size, timestamp):
+    def update(self, side, price, size, timestamp, check_cross = True):
         if side not in {"bid", "ask"}:
             raise ValueError(f"Side must be bid or ask, not {side}")
 
@@ -18,6 +18,17 @@ class OrderBook:
             getattr(self, f"{side}s")[price] = size
         
         self.updated_at: str = timestamp
+        if check_cross:
+            return self.check_cross()
+        else:
+            return False
+    
+    def batch_update(self, updates: list):
+        for update in updates:
+            self.update(side=update['side'], price=update['price'], size=update['size'], timestamp = update['timestamp'], check_cross=False)
+        
+        return self.check_cross()
+
     
     def snapshot(self, depth=5):
         bids = list(self.bids.items())[:depth]
@@ -54,9 +65,38 @@ class OrderBook:
 
         return total_value / total_filled if total_filled > 0 else np.nan
     
+    def check_cross(self):
+        if not self.bids or not self.asks:
+            return False  # Can't be crossed if one side empty
+        bid = self.best_bid
+        ask = self.best_ask
+        if bid >= ask:
+            print(f"[CROSS WARNING] Book crossed at {self.updated_at}: bid={bid}, ask={ask}")
+            return True
+        return False
+    
+    def resolve_cross(self):
+        """
+            Can implement if we want to, but polymarket data has been pretty good at resolving on its own
+            within 1 second or so (usually just at the same mid price temporarily, which is super easy)
+        """
+        pass
+    
+    def pretty_print(self):
+        print("-"*5, "ORDER BOOK", "-"*5)
+        print("|  PRICE  |  SIZE  |")
+        print("ASKS")
+        for price, size in list(self.asks.items())[::-1]:
+            print(f"|  {price}  |  {size}  |")
+        
+        print("-"*20)
+        print("BIDS")
+        for price, size in self.bids.items():
+            print(f"|  {price}  |  {size}  |")
+    
     @property
     def best_bid(self):
-        return self.bids.peekitem(0)[0] if self.bids else 0
+        return self.bids.peekitem(0)[0] if self.bids else 0.0
     
     @property
     def top_market(self):
@@ -66,7 +106,7 @@ class OrderBook:
     
     @property
     def best_ask(self):
-        return self.asks.peekitem(0)[0] if self.asks else np.inf
+        return self.asks.peekitem(0)[0] if self.asks else 1.0
     
     @property
     def spread(self):
