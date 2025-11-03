@@ -10,6 +10,9 @@ def binary_price(S, X, T, vol, r):
     """
         Binary option pricing model based on the Black-Scholes equation
     """
+    if T <= 0:
+        return 1 if S > X else 0
+
     d2 = (np.log(S/X) - (r - (vol**2)/2) * T) / (vol * np.sqrt(T))
 
     price = np.exp(-r*T) * norm.cdf(d2)
@@ -136,6 +139,8 @@ def parse_book(book_message):
     """
         Get all of the order book updates from a book
         message event in the polymarket market data stream
+
+        # TODO -> could add 0 size to all bids and asks that aren't there
     """
     condition_id = book_message['market']
     asset_id = book_message['asset_id']
@@ -149,18 +154,18 @@ def parse_book(book_message):
     for bid in bids:
         update = {
             "asset_id": asset_id,
-            "timestamp": timestamp,
-            "price": bid['price'],
-            "size": bid['size'],
+            "timestamp": int(timestamp),
+            "price": float(bid['price']),
+            "size": float(bid['size']),
             "side": "bid",
         }
         order_book_updates.append(update)
     for ask in asks:
         update = {
             "asset_id": asset_id,
-            "timestamp": timestamp,
-            "price": ask['price'],
-            "size": ask['size'],
+            "timestamp": int(timestamp),
+            "price": float(ask['price']),
+            "size": float(ask['size']),
             "side": "ask",
         }
         order_book_updates.append(update)
@@ -181,22 +186,23 @@ def parse_price_change(price_change_event):
         # NOTE, also has best bid and best ask data, but idrc
         update = {
                 "asset_id": price_change['asset_id'],
-                "timestamp": timestamp,
-                "price": price_change['price'],
-                "size": price_change['size'],
-                "side": "bid" if 'side' == "BUY" else "ask"
+                "timestamp": int(timestamp),
+                "price": float(price_change['price']),
+                "size": float(price_change['size']),
+                "side": "bid" if price_change['side'] == "BUY" else "ask"
             }
         order_book_updates.append(update)
 
     return order_book_updates
 
-
 def parse_all_book_updates(stream_data):
     """
-        Currently broken, as the book type is identical
-        for the Yes and No markets, but the updates show
-        the mirrored view, which means that they don't work naturally
-        together as this function assumed... will need to flip the book for no
+        Get all of the order book updates, both full book
+        and price changes
+
+        TODO -> whenever a book is sent, we should add updates
+        that are all 0 for the other levels to ensure they happen
+        properly
     """
     order_book_data = []
     for message in stream_data:
@@ -241,6 +247,45 @@ def parse_all_book_updates(stream_data):
             pass
     
     return order_book_data
+
+def parse_last_trade_price(trade_event):
+    # condition_id = trade_event['market']
+    update = {
+        "asset_id": trade_event['asset_id'],
+        "timestamp": int(trade_event['timestamp']),
+        "price": float(trade_event['price']),
+        "size": float(trade_event['size']),
+        "side": "bid" if trade_event['side'] == "BUY" else "ask",
+        "fee_rate_bps": float(trade_event['fee_rate_bps'])
+    }
+
+    return update
+
+def parse_all_trade_prices(stream_data, yes_token_id, no_token_id):
+    yes_perspective_trades = []
+    no_perspective_trades = []
+    for message in stream_data:
+        if isinstance(message, dict):
+            event = message
+            event_type = event['event_type']
+            if event_type == "last_trade_price":
+                trade_data = parse_last_trade_price(event)
+                if trade_data['asset_id'] == yes_token_id:
+                    yes_perspective_trades.append(trade_data.copy())
+                    # convert to no perspective
+                    trade_data['asset_id'] = no_token_id
+                    trade_data['price'] = 1-trade_data['price']
+                    trade_data['side'] = 'bid' if trade_data['side'] == 'ask' else 'ask'
+                    no_perspective_trades.append(trade_data)
+                else:
+                    no_perspective_trades.append(trade_data.copy())
+                    # convert to yes perspective
+                    trade_data['asset_id'] = yes_token_id
+                    trade_data['price'] = 1-trade_data['price']
+                    trade_data['side'] = 'bid' if trade_data['side'] == 'ask' else 'ask'
+                    yes_perspective_trades.append(trade_data)
+
+    return yes_perspective_trades, no_perspective_trades
 
 
 
