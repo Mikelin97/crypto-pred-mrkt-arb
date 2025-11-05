@@ -124,7 +124,7 @@ if market:
     else:
         display_columns = ["slug", "size_mb", "last_modified"]
         available_columns = [col for col in display_columns if col in slug_df.columns]
-        st.dataframe(slug_df[available_columns], use_container_width=True)
+        st.dataframe(slug_df[available_columns], width="stretch")
         slugs = slug_df["slug"].tolist()
         selected_slugs = st.multiselect(
             "Select contract snapshots",
@@ -153,7 +153,7 @@ if market:
                     data=archive_state["data"],
                     file_name=archive_state["file_name"],
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
 st.subheader("Daily Price Feeds")
@@ -180,7 +180,7 @@ for tab, label in zip(price_tabs, price_prefix_map):
             continue
 
         display_df = df.drop(columns=["key"], errors="ignore")
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
         options = df["filename"].tolist()
         selection_key = f"{label.lower()}_selection"
         selected_files = st.multiselect(
@@ -215,6 +215,6 @@ for tab, label in zip(price_tabs, price_prefix_map):
                     data=archive_state["data"],
                     file_name=archive_state["file_name"],
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                     key=download_key,
                 )
