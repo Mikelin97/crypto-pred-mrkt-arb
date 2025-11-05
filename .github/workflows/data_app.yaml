@@ -1,8 +1,8 @@
-name: Deploy to AWS ECS
+name: Data App to AWS ECS
 
 on:
   pull_request:
-    branches: [ main ]
+    paths: [ data_app/** ]
   workflow_dispatch:
 
 env:
