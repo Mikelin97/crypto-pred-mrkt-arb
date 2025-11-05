@@ -10,6 +10,9 @@ COPY page.py .
 
 COPY Market.py .
 
-EXPOSE 8501
+EXPOSE 80
 
-CMD ["streamlit", "run", "page.py"]
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_PORT=80
+
+CMD ["streamlit", "run", "page.py", "--server.address=0.0.0.0", "--server.port=80"]
