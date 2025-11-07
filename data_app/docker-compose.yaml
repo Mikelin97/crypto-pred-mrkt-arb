@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8501:80"
+    container_name: poly_punting_data_app
+    volumes:
+      - poly_punting_data_app:/app/data
+    networks:
+      - poly_punting_data_app_network
+    restart: unless-stopped
+networks:
+  poly_punting_data_app_network:
+    driver: bridge
+volumes:
+  poly_punting_data_app:
