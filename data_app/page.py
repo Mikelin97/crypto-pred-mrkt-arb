@@ -140,21 +140,52 @@ if market:
             st.session_state.pop("contract_archive", None)
             archive_state = None
 
-        cols = st.columns([1, 1])
-        with cols[0]:
-            if st.button("Prepare contract download", disabled=not selected_slugs):
-                _prepare_contract_archive(market, selected_slugs)
-                archive_state = st.session_state.get("contract_archive")
+        if slugs:
+            recent_default = min(5, len(slugs))
+            action_cols = st.columns(3)
+            with action_cols[0]:
+                if st.button(
+                    "Prepare selected",
+                    key="prepare_contract_selected",
+                    disabled=not selected_slugs,
+                ):
+                    _prepare_contract_archive(market, selected_slugs)
+                    archive_state = st.session_state.get("contract_archive")
+            with action_cols[1]:
+                if st.button(
+                    "Prepare all slugs",
+                    key="prepare_contract_all",
+                ):
+                    full_selection = slugs.copy()
+                    st.session_state["selected_contract_slugs"] = full_selection
+                    _prepare_contract_archive(market, full_selection)
+                    archive_state = st.session_state.get("contract_archive")
+            with action_cols[2]:
+                recent_count = st.number_input(
+                    "Most recent count",
+                    min_value=1,
+                    max_value=len(slugs),
+                    value=recent_default,
+                    step=1,
+                    key="contract_recent_count",
+                )
+                if st.button(
+                    "Prepare most recent",
+                    key="prepare_contract_recent",
+                ):
+                    recent_selection = slugs[: int(recent_count)]
+                    st.session_state["selected_contract_slugs"] = recent_selection
+                    _prepare_contract_archive(market, recent_selection)
+                    archive_state = st.session_state.get("contract_archive")
 
         if archive_state:
-            with cols[1]:
-                st.download_button(
-                    "Download contracts archive",
-                    data=archive_state["data"],
-                    file_name=archive_state["file_name"],
-                    mime="application/zip",
-                    width="stretch",
-                )
+            st.download_button(
+                "Download contracts archive",
+                data=archive_state["data"],
+                file_name=archive_state["file_name"],
+                mime="application/zip",
+                width="stretch",
+            )
 
 st.subheader("Daily Price Feeds")
 price_tabs = st.tabs(["Chainlink", "Binance"])
@@ -196,25 +227,55 @@ for tab, label in zip(price_tabs, price_prefix_map):
             st.session_state.pop(archive_key, None)
             archive_state = None
 
-        prepare_key = f"prepare_{label.lower()}_download"
         download_key = f"download_{label.lower()}_archive"
-        cols = st.columns([1, 1])
-        with cols[0]:
-            if st.button(
-                "Prepare download",
-                key=prepare_key,
-                disabled=not selected_files,
-            ):
-                _prepare_price_archive(label, selected_files, lookup)
-                archive_state = st.session_state.get(archive_key)
+        if options:
+            recent_default = min(5, len(options))
+            action_cols = st.columns(3)
+            prepare_selected_key = f"prepare_{label.lower()}_selected"
+            prepare_all_key = f"prepare_{label.lower()}_all"
+            prepare_recent_key = f"prepare_{label.lower()}_recent"
+            recent_count_key = f"{label.lower()}_recent_count"
+            with action_cols[0]:
+                if st.button(
+                    "Prepare selected",
+                    key=prepare_selected_key,
+                    disabled=not selected_files,
+                ):
+                    _prepare_price_archive(label, selected_files, lookup)
+                    archive_state = st.session_state.get(archive_key)
+            with action_cols[1]:
+                if st.button(
+                    "Prepare all files",
+                    key=prepare_all_key,
+                ):
+                    full_selection = options.copy()
+                    st.session_state[selection_key] = full_selection
+                    _prepare_price_archive(label, full_selection, lookup)
+                    archive_state = st.session_state.get(archive_key)
+            with action_cols[2]:
+                recent_count = st.number_input(
+                    "Most recent count",
+                    min_value=1,
+                    max_value=len(options),
+                    value=recent_default,
+                    step=1,
+                    key=recent_count_key,
+                )
+                if st.button(
+                    "Prepare most recent",
+                    key=prepare_recent_key,
+                ):
+                    recent_selection = options[: int(recent_count)]
+                    st.session_state[selection_key] = recent_selection
+                    _prepare_price_archive(label, recent_selection, lookup)
+                    archive_state = st.session_state.get(archive_key)
 
         if archive_state:
-            with cols[1]:
-                st.download_button(
-                    "Download archive",
-                    data=archive_state["data"],
-                    file_name=archive_state["file_name"],
-                    mime="application/zip",
-                    width="stretch",
-                    key=download_key,
-                )
+            st.download_button(
+                "Download archive",
+                data=archive_state["data"],
+                file_name=archive_state["file_name"],
+                mime="application/zip",
+                width="stretch",
+                key=download_key,
+            )
