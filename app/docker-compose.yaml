@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports: 
-      - "8501:80"
+      - "8501:443"
     env_file:
       - .env
     container_name: poly_punt_demo
