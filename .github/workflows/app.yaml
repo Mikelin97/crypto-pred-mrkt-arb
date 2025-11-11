@@ -7,8 +7,8 @@ on:
 
 env:
   AWS_REGION: ap-east-1
-  ECR_REPOSITORY: poly-punting-repo
-  ECS_SERVICE: poly-punting-service
+  ECR_REPOSITORY: poly-punting-demo-repo
+  ECS_SERVICE: poly-punting-demo-service
   ECS_CLUSTER: poly-punting-cluster
   ECS_TASK_DEFINITION: poly-punting-demo-task
   CONTAINER_NAME: poly-punting-demo
@@ -33,10 +33,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r /app/requirements.txt
+          pip install -r app/requirements.txt
 
       - name: Run smoke tests
-        run: streamlit run /app/page.py --headless --server.port 8501 & sleep 10
+        run: streamlit run app/page.py --server.port 80 & sleep 10
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -52,7 +52,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -f app/Dockerfile -t $ECR_REPOSITORY:$IMAGE_TAG app
 
       - name: Tag and push image to Amazon ECR
         id: push-image
