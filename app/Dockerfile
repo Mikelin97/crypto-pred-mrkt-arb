@@ -6,8 +6,11 @@ COPY app/requirements.txt requirements.txt
 
 RUN pip install -r requirements.txt
 
-COPY app/page.py .
+COPY backtest.py useful_functions.py ./
 COPY shared ./shared
+COPY app/page.py .
+
+RUN mkdir -p data/prices data/contracts
 
 
 EXPOSE 80
