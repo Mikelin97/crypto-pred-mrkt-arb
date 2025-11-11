@@ -2,11 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY app/requirements.txt requirements.txt
 
 RUN pip install -r requirements.txt
 
-COPY page.py .
+COPY backtest.py useful_functions.py ./
+COPY shared ./shared
+COPY app/page.py .
+
+RUN mkdir -p data/prices data/contracts
 
 
 EXPOSE 80

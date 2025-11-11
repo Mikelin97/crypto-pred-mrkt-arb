@@ -11,4 +11,5 @@ s3transfer==0.14.0
 six==1.17.0
 urllib3==2.5.0
 websockets==15.0.1
+sortedcontainers==2.4.0
 streamlit==1.49.1

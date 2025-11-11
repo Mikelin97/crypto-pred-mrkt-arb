@@ -113,7 +113,7 @@ def crypto_raw_to_pandas(file_path):
     json_df = pd.read_json(path_or_buf=file_path, lines=True)
     expanded_payload = pd.json_normalize(json_df['payload'])
     expanded_payload = expanded_payload.rename(columns={'timestamp': "unix_timestamp"})
-    crypto_df = pd.concat([json_df.drop(['payload', 'symbol', 'symbol_timestamp'], axis=1), expanded_payload], axis=1)
+    crypto_df = pd.concat([json_df.drop(['payload', 'symbol', 'symbol_timestamp'], axis=1, errors='ignore'), expanded_payload], axis=1)
 
     return crypto_df
 
