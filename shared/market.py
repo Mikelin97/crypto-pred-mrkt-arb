@@ -24,9 +24,7 @@ class Market:
     ) -> None:
         self.name = name
         self._asset = name.lower()
-        self._data_root = (
-            Path(data_root) if data_root else Path(__file__).resolve().parent / "data"
-        )
+        self._data_root = Path(data_root) if data_root else Path.cwd() / "data"
         self._contract_dir = self._data_root / "contracts" / self._asset
         self._contract_dir.mkdir(parents=True, exist_ok=True)
 

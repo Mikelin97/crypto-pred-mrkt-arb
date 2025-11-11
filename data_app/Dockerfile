@@ -2,13 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY data_app/requirements.txt requirements.txt
 
 RUN pip install -r requirements.txt
 
-COPY page.py .
-
-COPY Market.py .
+COPY data_app/page.py .
+COPY shared ./shared
 
 EXPOSE 80
 

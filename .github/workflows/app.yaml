@@ -52,7 +52,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f app/Dockerfile -t $ECR_REPOSITORY:$IMAGE_TAG app
+          docker build -f app/Dockerfile -t $ECR_REPOSITORY:$IMAGE_TAG .
 
       - name: Tag and push image to Amazon ECR
         id: push-image
