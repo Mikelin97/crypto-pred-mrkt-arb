@@ -2,7 +2,7 @@ name: Data Pipeline to AWS ECS
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ data-pipeline-deploy ]
   workflow_dispatch:
 
 env:

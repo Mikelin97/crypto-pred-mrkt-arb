@@ -1,8 +1,8 @@
-name: Deploy App to AWS ECS
+name: Polypunt Demo to AWS ECS
 
 on:
   pull_request:
-    branches: [ main ]
+    paths: [ app/** ]
   workflow_dispatch:
 
 env:
