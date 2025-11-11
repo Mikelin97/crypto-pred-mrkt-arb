@@ -7,8 +7,8 @@ on:
 
 env:
   AWS_REGION: ap-east-1
-  ECR_REPOSITORY: poly-punting-repo
-  ECS_SERVICE: poly-punting-service
+  ECR_REPOSITORY: poly-punting-demo-repo
+  ECS_SERVICE: poly-punting-demo-service
   ECS_CLUSTER: poly-punting-cluster
   ECS_TASK_DEFINITION: poly-punting-demo-task
   CONTAINER_NAME: poly-punting-demo
