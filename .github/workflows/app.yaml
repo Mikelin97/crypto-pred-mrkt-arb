@@ -1,17 +1,17 @@
-name: Data App to AWS ECS
+name: Polypunt Demo to AWS ECS
 
 on:
   pull_request:
-    paths: [ data_app/** ]
+    paths: [ app/** ]
   workflow_dispatch:
 
 env:
   AWS_REGION: ap-east-1
-  ECR_REPOSITORY: poly-punting-data-app-repo
-  ECS_SERVICE: poly-punting-service
+  ECR_REPOSITORY: poly-punting-demo-repo
+  ECS_SERVICE: poly-punting-demo-service
   ECS_CLUSTER: poly-punting-cluster
-  ECS_TASK_DEFINITION: data-app-task
-  CONTAINER_NAME: data-app
+  ECS_TASK_DEFINITION: poly-punting-demo-task
+  CONTAINER_NAME: poly-punting-demo
   S3_TARGET_BUCKET: poly-punting-raw
 
 jobs:
@@ -33,11 +33,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r data_app/requirements.txt
+          pip install -r app/requirements.txt
 
       - name: Run smoke tests
-        run: python -m compileall data_app
-
+        run: streamlit run app/page.py --server.port 80 & sleep 10
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -53,7 +52,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f data_app/Dockerfile -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -f app/Dockerfile -t $ECR_REPOSITORY:$IMAGE_TAG .
 
       - name: Tag and push image to Amazon ECR
         id: push-image
@@ -66,3 +65,5 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+  

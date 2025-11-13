@@ -4,8 +4,8 @@ from collections import deque
 import json
 import requests
 from useful_functions import crypto_raw_to_pandas, parse_all_book_updates, parse_all_trade_prices
-from Strategy import Strategy
-from OrderBook import OrderBook
+from shared.strategy import Strategy
+from shared.orderbook import OrderBook
 
 def backtest_market(crypto_data_filepath, crypto_data_filename, crypto_symbol, 
                     market_data_filepath, market_slug,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -10,7 +11,11 @@ import pandas as pd
 import streamlit as st
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
-from Market import Market
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from shared.market import Market
 
 DATA_ROOT = Path(__file__).resolve().parent / "data"
 PRICE_DIR = DATA_ROOT

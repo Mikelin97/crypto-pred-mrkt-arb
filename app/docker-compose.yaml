@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: app/Dockerfile
+    ports: 
+      - "8501:80"
+    env_file:
+      - .env
+    container_name: poly_punt_demo
+    volumes:
+      - poly_punt_demo_data:/app/data
+    networks:
+      - poly_punt_demo_network
+    restart: unless-stopped
+networks:
+  poly_punt_demo_network:
+    driver: bridge
+volumes:
+  poly_punt_demo_data:
