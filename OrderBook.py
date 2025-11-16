@@ -99,6 +99,11 @@ class OrderBook:
         return self.bids.peekitem(0)[0] if self.bids else 0.0
     
     @property
+    def top_bid_level(self):
+        price, size = self.bids.peekitem(0) if self.bids else (np.nan, np.nan)
+        return price, size
+    
+    @property
     def top_market(self):
         bid_level = self.bids.peekitem(0) if self.bids else (np.nan, np.nan)
         ask_level = self.asks.peekitem(0) if self.asks else (np.nan, np.nan)
@@ -109,13 +114,45 @@ class OrderBook:
         return self.asks.peekitem(0)[0] if self.asks else 1.0
     
     @property
+    def top_ask_level(self):
+        price, size = self.asks.peekitem(0) if self.asks else (np.nan, np.nan)
+        return price, size
+    
+    @property
     def spread(self):
         return self.best_ask - self.best_bid if self.bids and self.asks else np.nan # TODO -> could make this max 1 if not
     
+    def min_volume_spread(self, min_volume):
+        ask_volume = 0
+        bid_volume = 0
+        bid_price = np.nan
+        ask_price = np.nan
+
+        for price, size in self.bids.items():
+            bid_volume += size
+            if bid_volume >= min_volume:
+                bid_price = price
+                break
+        
+        for price, size in self.asks.items():
+            ask_volume += size
+            if ask_volume >= min_volume:
+                ask_price = price
+                break
+        
+        return ask_price - bid_price
+    
     @property
     def mid(self):
-        return (self.best_bid + self.best_ask) / 2 if self.bids and self.asks else np.nan
-
+        if self.bids and self.asks:
+            return (self.best_bid + self.best_ask) / 2
+        elif self.bids:
+            return (self.best_bid + 1.0) / 2
+        elif self.asks:
+            return (0.0 + self.best_ask) / 2
+        else:
+            return np.nan
+    
     @property
     def lwm(self):
         """

@@ -13,11 +13,75 @@ def binary_price(S, X, T, vol, r):
     if T <= 0:
         return 1 if S > X else 0
 
-    d2 = (np.log(S/X) - (r - (vol**2)/2) * T) / (vol * np.sqrt(T))
+    d2 = (np.log(S/X) + (r - (vol**2)/2) * T) / (vol * np.sqrt(T))
 
     price = np.exp(-r*T) * norm.cdf(d2)
     return price
 
+def implied_vol_binary(S, X, T, r, price, anchor_vol, dist_weight = 10):
+    """
+        Solve for implied volatility(s) sigma from a binary (cash-or-nothing) call price
+        p = exp(-rT) * N(d2) under Black-Scholes.
+        Returns:
+        IF WE HAVE AN ANCHOR:
+            - a single sigma if `anchor_vol` is provided (the root closest to anchor_vol)
+                - and a confidence label based on distance from anchor (0 to 1 for high and 0 to -1 for low)
+            - np.nan if no valid root + confidence = 0.0
+        
+            - if you want the other level, you can back it out
+        
+    """
+    # ensure the price is within no arbitrage
+    p_min = 0.0
+    p_max = np.exp(-r * T)
+    if not (p_min < price < p_max):
+        return np.nan, 0.0
+
+    q = price / np.exp(-r * T)
+    if not (0.0 < q < 1.0):
+        return np.nan, 0.0
+    
+    z = norm.ppf(q) #inverse cdf of price / e^-rt
+
+    a = 0.5*T
+    b = z*np.sqrt(T)
+    c = -(np.log(S/X) + r*T)
+
+    disc = b**2 - 4 * a * c
+    if disc < 0:
+        return np.nan, 0.0
+
+    sqrt_disc = np.sqrt(disc)
+    vol_high = (-b + sqrt_disc) / (2 * a)
+    vol_low = (-b - sqrt_disc) / (2 * a)
+
+    # With anchor, figure out which root to use
+    if vol_high < 0 and vol_low < 0:
+        return np.nan, 0.0
+    
+    if vol_low < 0:
+        return vol_high, 1.0
+    
+    if vol_high < 0:
+        return vol_low, -1.0
+
+    # if both roots could be valid and we have an anchor to work with
+    dist_high = abs(vol_high - anchor_vol)
+    dist_low = abs(vol_low - anchor_vol)
+    
+    def flipped_sigmoid(x, weight = 10):
+        # weight = how heavily to penalize excess distance in confidence
+        return 1 / (1 + np.exp(weight*x))
+    
+    sig_high = flipped_sigmoid(dist_high, weight=dist_weight)
+    sig_low = flipped_sigmoid(dist_low, weight=dist_weight)
+    
+    confidence = (sig_high - sig_low)/ (sig_high + sig_low)
+
+    if sig_high > sig_low:
+        return vol_high, confidence
+    else:
+        return vol_low, confidence
 
 def get_all_events(closed="false", tag_id = ''):
 
@@ -110,13 +174,12 @@ def crypto_raw_to_pandas(file_path):
     """
         Take chainlink or binance raw data from a file and convert it inot pandas format for analysis
     """
-    json_df = pd.read_json(path_or_buf=file_path, lines=True)
+    json_df = pd.read_json(path_or_buf=file_path, lines=True, convert_dates=False)
     expanded_payload = pd.json_normalize(json_df['payload'])
     expanded_payload = expanded_payload.rename(columns={'timestamp': "unix_timestamp"})
-    crypto_df = pd.concat([json_df.drop(['payload', 'symbol', 'symbol_timestamp'], axis=1), expanded_payload], axis=1)
+    crypto_df = pd.concat([json_df.drop(['payload', 'symbol', 'symbol_timestamp'], axis=1, errors='ignore'), expanded_payload], axis=1)
 
     return crypto_df
-
 
 def compute_vol(returns: pd.Series, effective_memory):
     """

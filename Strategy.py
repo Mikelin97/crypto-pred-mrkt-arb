@@ -2,11 +2,11 @@ class Strategy:
     def __init__(self):
         pass
 
-    def on_warmup(self, timestamp, crypto_price, order_book):
+    def on_warmup(self, timestamp, crypto_price, book_updates, trades):
         """Called during warm-up period before official backtest start."""
         raise NotImplementedError
 
-    def on_update(self, timestamp, crypto_price, order_book):
+    def on_update(self, timestamp, crypto_price, book_updates, trades):
         """Main decision point — return actions or orders."""
         raise NotImplementedError
 
