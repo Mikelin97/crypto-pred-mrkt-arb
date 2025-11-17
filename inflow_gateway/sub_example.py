@@ -27,7 +27,7 @@ def _safe_timestamp(value: Any) -> Optional[float]:
     return None
 
 
-async def _subscribe_and_log(redis_url: str, channel: str) -> None:
+async def _subscribe_and_log(redis_url: str, channel: str, mode: str) -> None:
     client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
     pubsub = client.pubsub()
     await pubsub.subscribe(channel)
@@ -60,22 +60,24 @@ async def _subscribe_and_log(redis_url: str, channel: str) -> None:
             if message.get("type") != "message":
                 continue
 
-            receive_ms = _now_ms()
             raw_payload = message.get("data")
-            parse_ms = receive_ms
-            parsed: Optional[Dict[str, Any]] = None
-
-            if isinstance(raw_payload, str):
-                try:
-                    parsed = json.loads(raw_payload)
-                except json.JSONDecodeError as exc:
-                    print(f"[WARN] Failed to decode payload: {exc} ({raw_payload[:80]}...)")
-                    continue
-                parse_ms = _now_ms()
-            else:
+            if not isinstance(raw_payload, str):
                 print(f"[WARN] Unexpected payload type: {type(raw_payload).__name__}")
                 continue
 
+            receive_ms = _now_ms()
+
+            if mode == "raw":
+                print(f"[{channel}] {raw_payload}", flush=True)
+                continue
+
+            try:
+                parsed: Dict[str, Any] = json.loads(raw_payload)
+            except json.JSONDecodeError as exc:
+                print(f"[WARN] Failed to decode payload: {exc} ({raw_payload[:80]}...)")
+                continue
+
+            parse_ms = _now_ms()
             outer_ts = _safe_timestamp(parsed.get("timestamp"))
             payload_obj = parsed.get("payload")
             inner_ts = (
@@ -130,10 +132,16 @@ def main() -> None:
         default=os.getenv("REDIS_CHANNEL", "chainlink.crypto.prices"),
         help="Redis PUB/SUB channel to subscribe (default: %(default)s)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("metrics", "raw"),
+        default="metrics",
+        help="Output mode: 'metrics' for latency info, 'raw' for full payloads.",
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(_subscribe_and_log(args.redis_url, args.channel))
+        asyncio.run(_subscribe_and_log(args.redis_url, args.channel, args.mode))
     except KeyboardInterrupt:
         sys.exit(0)
 

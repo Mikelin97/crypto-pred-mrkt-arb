@@ -268,17 +268,21 @@ async def stream_single_market(
                         )
                         continue
 
+                    payload_to_publish = payload
                     meta = _ensure_meta(payload)
                     if meta is None:
-                        logger.warning(
-                            "Unexpected payload type for market %s: %s",
-                            market.slug,
-                            type(payload).__name__,
-                        )
-                        continue
-                    meta["market_slug"] = market.slug
-                    meta["asset"] = asset_name
-                    await publisher.publish(redis_channel, payload)
+                        payload_to_publish = {
+                            "raw_payload": payload,
+                            "meta": {
+                                "market_slug": market.slug,
+                                "asset": asset_name,
+                                "note": "wrapped_non_dict_payload",
+                            },
+                        }
+                    else:
+                        meta["market_slug"] = market.slug
+                        meta["asset"] = asset_name
+                    await publisher.publish(redis_channel, payload_to_publish)
 
                 return
         except websockets.ConnectionClosed as exc:
@@ -370,16 +374,16 @@ async def stream_live_feed(
                         )
                         continue
 
+                    payload_to_publish = payload
                     meta = _ensure_meta(payload)
                     if meta is None:
-                        logger.warning(
-                            "Unexpected payload type for %s feed: %s",
-                            name,
-                            type(payload).__name__,
-                        )
-                        continue
-                    meta["source"] = name
-                    await publisher.publish(redis_channel, payload)
+                        payload_to_publish = {
+                            "raw_payload": payload,
+                            "meta": {"source": name, "note": "wrapped_non_dict_payload"},
+                        }
+                    else:
+                        meta["source"] = name
+                    await publisher.publish(redis_channel, payload_to_publish)
 
                     if (
                         dt.datetime.now() - last_ping
