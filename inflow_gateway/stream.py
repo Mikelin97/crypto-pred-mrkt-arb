@@ -24,7 +24,7 @@ LIVE_DATA_WS_URL = os.getenv(
 DEFAULT_MARKET_TAG = os.getenv("DEFAULT_MARKET_TAG", "102467")
 
 MARKET_DURATION_SECONDS = int(os.getenv("MARKET_DURATION_SECONDS", str(15 * 60)))
-MARKET_START_LEAD_SECONDS = int(os.getenv("MARKET_START_LEAD_SECONDS", str(5 * 60)))
+MARKET_START_LEAD_SECONDS = int(os.getenv("MARKET_START_LEAD_SECONDS", str(1 * 60)))
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 CHAINLINK_REDIS_CHANNEL = os.getenv(
@@ -191,6 +191,13 @@ def _classify_market_window(market: MarketDescriptor) -> str:
     return "active"
 
 
+def _seconds_until_market_start(market: MarketDescriptor) -> float:
+    if market.timestamp is None:
+        return 0.0
+    start_ts = market.timestamp - MARKET_START_LEAD_SECONDS
+    return max(start_ts - time.time(), 0.0)
+
+
 async def populate_market_queue(
     asset_name: str,
     config: Dict[str, str],
@@ -306,35 +313,32 @@ async def stream_markets_for_asset(
     publisher: RedisPublisher,
     inactivity_timeout: float = 10.0,
 ) -> None:
-    while not stop_event.is_set():
+    active_tasks: Set[asyncio.Task] = set()
+
+    async def _run_market(market: MarketDescriptor) -> None:
         try:
-            market = await asyncio.wait_for(queue.get(), timeout=5.0)
-        except asyncio.TimeoutError:
-            continue
+            delay = _seconds_until_market_start(market)
+            if delay > 0:
+                logger.info(
+                    "Waiting %.2fs before starting %s market stream.",
+                    delay,
+                    market.slug,
+                )
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                    logger.info(
+                        "Stop signal received before starting market %s", market.slug
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    raise
 
-        status = _classify_market_window(market)
-        if status == "future":
-            wait_seconds = max(
-                market.timestamp - MARKET_START_LEAD_SECONDS - time.time(), 0
-            )
-            logger.debug(
-                "Market %s not active yet (starts in %.1fs); requeueing.",
-                market.slug,
-                wait_seconds,
-            )
-            queue.task_done()
-            if wait_seconds > 0:
-                await asyncio.sleep(min(wait_seconds, 60))
-            await queue.put(market)
-            continue
+            if stop_event.is_set():
+                return
 
-        if status == "expired":
-            logger.info("Skipping expired market %s", market.slug)
-            queue.task_done()
-            continue
-
-        logger.info("Streaming %s market: %s", asset_name.upper(), market.slug)
-        try:
+            logger.info("Streaming %s market: %s", asset_name.upper(), market.slug)
             await stream_single_market(
                 asset_name,
                 market,
@@ -344,6 +348,39 @@ async def stream_markets_for_asset(
             )
         finally:
             queue.task_done()
+
+    while not stop_event.is_set():
+        done_tasks = {task for task in active_tasks if task.done()}
+        for task in done_tasks:
+            active_tasks.discard(task)
+            if task.cancelled():
+                continue
+            try:
+                task.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Market stream task error (%s): %s",
+                    task.get_name() if hasattr(task, "get_name") else "unknown",
+                    exc,
+                )
+
+        try:
+            market = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+
+        status = _classify_market_window(market)
+        if status == "expired":
+            logger.info("Skipping expired market %s", market.slug)
+            queue.task_done()
+            continue
+
+        task = asyncio.create_task(_run_market(market), name=f"{asset_name}:{market.slug}")
+        active_tasks.add(task)
+
+    for task in active_tasks:
+        task.cancel()
+    await asyncio.gather(*active_tasks, return_exceptions=True)
 
 
 async def stream_live_feed(
