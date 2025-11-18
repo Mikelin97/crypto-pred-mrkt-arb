@@ -96,8 +96,9 @@ class LiveStrategyEngine:
         self._loop = asyncio.get_running_loop()
 
     async def handle_message(self, channel: str, payload: object) -> None:
+        receive_wall_ms = time.time() * 1000
         if channel == self.market_channel:
-            await self._handle_market_payload(payload)
+            await self._handle_market_payload(payload, receive_wall_ms)
         else:
             self._handle_chainlink_payload(payload)
 
@@ -131,7 +132,7 @@ class LiveStrategyEngine:
             return
         self._last_crypto_price = price
 
-    async def _handle_market_payload(self, payload: object) -> None:
+    async def _handle_market_payload(self, payload: object, receive_wall_ms: float) -> None:
         data = self._extract_payload(payload)
         if not data:
             return
@@ -163,10 +164,11 @@ class LiveStrategyEngine:
             self.strategy.on_update(timestamp, crypto_price, flat_updates)
             state = self.strategy.get_state()
             theo = state.get("theo_price")
-            print(
-                f"[PRICING] ts={timestamp} asset_price={crypto_price:.4f} theo={theo if theo is not None else 'nan'}"
-            )
-            await self._maybe_place_order()
+            timing = {
+                "message_ts": timestamp,
+                "receive_wall_ms": receive_wall_ms,
+            }
+            await self._maybe_place_order(timing=timing)
 
     def _to_orderbook_updates(self, data: Dict) -> Dict[str, List[Dict]]:
         updates: Dict[str, List[Dict]] = {}
@@ -210,7 +212,9 @@ class LiveStrategyEngine:
                 )
         return updates
 
-    async def _maybe_place_order(self) -> None:
+    async def _maybe_place_order(
+        self, *, timing: Optional[Dict[str, float]] = None
+    ) -> None:
         if time.time() - self._last_order_time < self.cooldown_seconds:
             return
 
@@ -274,7 +278,17 @@ class LiveStrategyEngine:
                 sell_size = min(self.order_size, holdings)
                 self.positions[asset_id] = holdings - sell_size
 
-            print(f"[TRADE] {side.upper()} {self.order_size} {asset_id} @ {price:.4f} ")
+            print(
+                f"[TRADE] {side.upper()} {self.order_size} {asset_id} @ {price:.4f} "
+                f"(fair={fair:.4f}, theo={theo:.4f}, holdings={self.positions.get(asset_id, 0.0):.2f})"
+            )
+
+        if timing:
+            msg_ts = timing.get("message_ts")
+            recv_ms = timing.get("receive_wall_ms")
+            if msg_ts is not None and recv_ms is not None:
+                latency_ms = recv_ms - msg_ts
+                print(f"[PERF] message_to_receive={latency_ms:.2f}ms")
 
         self._last_order_time = time.time()
 
