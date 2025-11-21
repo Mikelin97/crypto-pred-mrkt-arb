@@ -59,6 +59,8 @@ class RedisSettings:
 class PostgresSettings:
     dsn: str = os.getenv("POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/postgres")
     target_table: str = os.getenv("TARGET_TABLE", "kafka_price_changes")
+    chainlink_table: str = os.getenv("CHAINLINK_TABLE", "chainlink_prices")
+    binance_table: str = os.getenv("BINANCE_TABLE", "binance_prices")
     persistence_query: Optional[str] = os.getenv("PERSISTENCE_QUERY")
     persistence_poll_seconds: float = _get_float("PERSISTENCE_POLL_SECONDS", 60.0)
     persistence_max_rows: int = _get_int("PERSISTENCE_MAX_ROWS", 5000)

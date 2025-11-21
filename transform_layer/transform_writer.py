@@ -57,9 +57,13 @@ class TransformWriter:
         self.settings = settings
         self._consumer: Optional[AIOKafkaConsumer] = None
         self._pg_pool: Optional[asyncpg.Pool] = None
-        self._pending: List[TransformedRecord] = []
+        self._pending: List[Tuple[str, Tuple]] = []
         self._stop_event = asyncio.Event()
-        self._table = self._validate_table(settings.postgres.target_table)
+        self._table_price_changes = self._validate_table(settings.postgres.target_table)
+        self._table_chainlink = self._validate_table(settings.postgres.chainlink_table)
+        self._table_binance = self._validate_table(settings.postgres.binance_table)
+        self._table_passthrough = self._validate_table(os.getenv("PASSTHROUGH_TABLE", "kafka_raw_events"))
+        self._bypass_parsing = os.getenv("BYPASS_PARSING", "").lower() in {"1", "true", "yes"}
 
     async def start(self) -> None:
         await self._start_clients()
@@ -111,13 +115,20 @@ class TransformWriter:
     async def _consume_loop(self) -> None:
         assert self._consumer is not None
         async for message in self._consumer:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Consumed msg topic=%s partition=%s offset=%s",
+                    getattr(message, "topic", None),
+                    getattr(message, "partition", None),
+                    getattr(message, "offset", None),
+                )
             records = self._to_records(message.value)
             if records:
                 self._pending.extend(records)
             if len(self._pending) >= self.settings.batch.batch_size:
                 await self._flush()
 
-    def _to_records(self, message: object) -> List[TransformedRecord]:
+    def _to_records(self, message: object) -> List[Tuple[str, Tuple]]:
         try:
             payload = message if isinstance(message, dict) else json.loads(str(message))
         except json.JSONDecodeError:
@@ -132,57 +143,120 @@ class TransformWriter:
         if not isinstance(base, dict):
             base = {"value": base}
 
-        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-        source = payload.get("source") or meta.get("source")
-        event_type = payload.get("event_type") or meta.get("event_type")
+        meta = base.get("meta") if isinstance(base.get("meta"), dict) else {}
+        source = base.get("source") or meta.get("source")
+        event_type = base.get("event_type") or meta.get("event_type")
         ingested_at = datetime.now(timezone.utc)
+        
+
+        if event_type == "price_change":
+            return self._build_price_change_records(base, source, event_type, ingested_at)
+        if source and source.lower() == "chainlink":
+            return self._build_chainlink_records(base, source, ingested_at)
+        if source and source.lower() == "binance":
+            return self._build_binance_records(base, source, ingested_at)
+
+        logger.debug(
+            "Dropping message with source=%s event_type=%s keys=%s",
+            source,
+            event_type,
+            list(base.keys()),
+        )
+        return []
+
+    def _build_price_change_records(
+        self, base: Dict[str, Any], source: Optional[str], event_type: Optional[str], ingested_at: datetime
+    ) -> List[Tuple[str, Tuple]]:
         market = str(base.get("market")) if base.get("market") is not None else None
         timestamp_ms = _to_int(base.get("timestamp"))
 
         price_changes = base.get("price_changes")
-        records: List[TransformedRecord] = []
+        records: List[Tuple[str, Tuple]] = []
         if isinstance(price_changes, list) and price_changes:
             for change in price_changes:
                 if not isinstance(change, dict):
                     continue
                 records.append(
-                    TransformedRecord(
-                        ingested_at=ingested_at,
-                        source=source,
-                        event_type=event_type or "price_change",
-                        market=market,
-                        asset_id=_to_str(change.get("asset_id")),
-                        side=_to_str(change.get("side")),
-                        price=_to_float(change.get("price")),
-                        size=_to_float(change.get("size")),
-                        hash=_to_str(change.get("hash")),
-                        best_bid=_to_float(change.get("best_bid")),
-                        best_ask=_to_float(change.get("best_ask")),
-                        timestamp_ms=timestamp_ms,
-                        raw_payload=base,
+                    (
+                        self._table_price_changes,
+                        TransformedRecord(
+                            ingested_at=ingested_at,
+                            source=source,
+                            event_type=event_type or "price_change",
+                            market=market,
+                            asset_id=_to_str(change.get("asset_id")),
+                            side=_to_str(change.get("side")),
+                            price=_to_float(change.get("price")),
+                            size=_to_float(change.get("size")),
+                            hash=_to_str(change.get("hash")),
+                            best_bid=_to_float(change.get("best_bid")),
+                            best_ask=_to_float(change.get("best_ask")),
+                            timestamp_ms=timestamp_ms,
+                            raw_payload=base,
+                        ).as_tuple(),
                     )
                 )
             return records
 
-        # Fallback: capture a single row even if no price_changes array.
         records.append(
-            TransformedRecord(
-                ingested_at=ingested_at,
-                source=source,
-                event_type=event_type,
-                market=market,
-                asset_id=_to_str(base.get("asset_id")),
-                side=_to_str(base.get("side")),
-                price=_to_float(base.get("price")),
-                size=_to_float(base.get("size")),
-                hash=_to_str(base.get("hash")),
-                best_bid=_to_float(base.get("best_bid")),
-                best_ask=_to_float(base.get("best_ask")),
-                timestamp_ms=timestamp_ms,
-                raw_payload=base,
+            (
+                self._table_price_changes,
+                TransformedRecord(
+                    ingested_at=ingested_at,
+                    source=source,
+                    event_type=event_type,
+                    market=market,
+                    asset_id=_to_str(base.get("asset_id")),
+                    side=_to_str(base.get("side")),
+                    price=_to_float(base.get("price")),
+                    size=_to_float(base.get("size")),
+                    hash=_to_str(base.get("hash")),
+                    best_bid=_to_float(base.get("best_bid")),
+                    best_ask=_to_float(base.get("best_ask")),
+                    timestamp_ms=timestamp_ms,
+                    raw_payload=base,
+                ).as_tuple(),
             )
         )
         return records
+
+    def _build_chainlink_records(
+        self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
+    ) -> List[Tuple[str, Tuple]]:
+        payload = base if isinstance(base, dict) else {}
+        return [
+            (
+                self._table_chainlink,
+                (
+                    ingested_at,
+                    source,
+                    _to_str(payload.get("symbol")),
+                    _to_float(payload.get("value")),
+                    _to_str(payload.get("full_accuracy_value")),
+                    _to_int(payload.get("timestamp")),
+                    json.dumps(base),
+                ),
+            )
+        ]
+
+    def _build_binance_records(
+        self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
+    ) -> List[Tuple[str, Tuple]]:
+        payload = base if isinstance(base, dict) else {}
+        return [
+            (
+                self._table_binance,
+                (
+                    ingested_at,
+                    source,
+                    _to_str(payload.get("symbol")),
+                    _to_float(payload.get("value")),
+                    _to_str(payload.get("full_accuracy_value")),
+                    _to_int(payload.get("timestamp")),
+                    json.dumps(base),
+                ),
+            )
+        ]
 
     async def _periodic_flush(self) -> None:
         while not self._stop_event.is_set():
@@ -198,21 +272,52 @@ class TransformWriter:
             return
         records = self._pending
         self._pending = []
-        sql = (
-            f"INSERT INTO {self._table} ("
-            "ingested_at, source, event_type, market, asset_id, side, price, size, hash, "
-            "best_bid, best_ask, timestamp_ms, raw_payload"
-            ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        )
+
+        grouped: Dict[str, List[Tuple]] = {}
+        for table, values in records:
+            grouped.setdefault(table, []).append(values)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Flushing grouped batches: %s",
+                {table: len(rows) for table, rows in grouped.items()},
+            )
+
+        sql_map = {
+            self._table_price_changes: (
+                "INSERT INTO "
+                f"{self._table_price_changes} "
+                "(ingested_at, source, event_type, market, asset_id, side, price, size, hash, "
+                "best_bid, best_ask, timestamp_ms, raw_payload) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+            ),
+            self._table_chainlink: (
+                "INSERT INTO "
+                f"{self._table_chainlink} "
+                "(ingested_at, source, symbol, value, full_accuracy_value, timestamp_ms, raw_payload) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            ),
+            self._table_binance: (
+                "INSERT INTO "
+                f"{self._table_binance} "
+                "(ingested_at, source, symbol, value, full_accuracy_value, timestamp_ms, raw_payload) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            ),
+        }
+
         try:
             async with self._pg_pool.acquire() as conn:
-                await conn.executemany(sql, [item.as_tuple() for item in records])
+                for table, rows in grouped.items():
+                    if table not in sql_map:
+                        logger.warning("No SQL mapping for table %s; skipping %d rows", table, len(rows))
+                        continue
+                    await conn.executemany(sql_map[table], rows)
             if self._consumer:
                 await self._consumer.commit()
-            logger.info("Flushed %d records into %s", len(records), self._table)
+            logger.info(
+                "Flushed %d records across %d tables", sum(len(rows) for rows in grouped.values()), len(grouped)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to flush %d records: %s", len(records), exc)
-            # Re-queue failed batch so it is retried on next flush.
             self._pending = records + self._pending
 
     def _validate_table(self, table: str) -> str:
