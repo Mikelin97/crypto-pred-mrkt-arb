@@ -31,43 +31,57 @@ class RedisSubscriber:
             return raw
 
     @asynccontextmanager
-    async def subscription(self, channels: Iterable[str]):
+    async def subscription(self, channels: Iterable[str], patterns: Iterable[str] | None = None):
         pubsub = self._client.pubsub()
-        await pubsub.subscribe(*channels)
+        channels = tuple(channels)
+        patterns = tuple(patterns or ())
+        if channels:
+            await pubsub.subscribe(*channels)
+        if patterns:
+            await pubsub.psubscribe(*patterns)
         try:
             yield pubsub
         finally:
-            await pubsub.unsubscribe(*channels)
+            if channels:
+                await pubsub.unsubscribe(*channels)
+            if patterns:
+                await pubsub.punsubscribe(*patterns)
             await pubsub.close()
 
     async def iter_messages(
-        self, channels: Iterable[str], *, poll_interval: float = 0.5
+        self,
+        channels: Iterable[str],
+        *,
+        patterns: Iterable[str] | None = None,
+        poll_interval: float = 0.5,
     ) -> AsyncIterator[Tuple[str, object]]:
-        async with self.subscription(channels) as pubsub:
+        async with self.subscription(channels, patterns) as pubsub:
             while True:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=poll_interval)
                 if message is None:
                     await asyncio.sleep(0)
                     continue
-                if message.get("type") != "message":
+                if message.get("type") not in {"message", "pmessage"}:
                     continue
-                yield message["channel"], await self._decode(message["data"])
+                channel = message.get("channel")
+                yield channel, await self._decode(message["data"])
 
     async def run(
         self,
         channels: Iterable[str],
         handler: Callable[[str, object], asyncio.Future | None],
         *,
+        patterns: Iterable[str] | None = None,
         poll_interval: float = 0.5,
         stop_event: asyncio.Event | None = None,
     ) -> None:
         stop_event = stop_event or asyncio.Event()
-        async with self.subscription(channels) as pubsub:
+        async with self.subscription(channels, patterns) as pubsub:
             while not stop_event.is_set():
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=poll_interval)
                 if message is None:
                     continue
-                if message.get("type") != "message":
+                if message.get("type") not in {"message", "pmessage"}:
                     continue
                 payload = await self._decode(message["data"])
                 maybe = handler(message["channel"], payload)

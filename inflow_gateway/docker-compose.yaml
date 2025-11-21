@@ -27,6 +27,7 @@ services:
 networks:
   inflow_gateway:
     driver: bridge
+    name: inflow_gateway
 
 volumes:
   redis_data:
