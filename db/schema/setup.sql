@@ -2,6 +2,8 @@
 \i tables/series.sql
 \i tables/users.sql
 \i tables/tags.sql
+\i tables/chainlink_prices.sql
+\i tables/binance_prices.sql
 
 -- d1
 \i tables/events.sql

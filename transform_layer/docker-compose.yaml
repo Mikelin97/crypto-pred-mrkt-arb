@@ -71,7 +71,8 @@ services:
       - KAFKA_PERSIST_TOPIC=market.persisted
       - KAFKA_CONSUMER_GROUP=transform-writer
       - POSTGRES_DSN=postgresql://postgres:postgres@persistence_postgres:5432/postgres
-      - TARGET_TABLE=kafka_price_changes
+      - ORDER_BOOK_UPDATES_TABLE=order_book_updates
+      - ORDER_BOOK_SNAPSHOTS_TABLE=order_book_snapshots
       - BATCH_SIZE=500
       - BATCH_INTERVAL_SECONDS=1.0
     networks:

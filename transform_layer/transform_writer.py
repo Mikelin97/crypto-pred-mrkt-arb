@@ -1,9 +1,9 @@
 import asyncio
 import json
 import logging
+import os
 import signal
 import string
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,40 +16,6 @@ from transform_layer.config import Settings, load_settings
 logger = logging.getLogger("transform_layer.transform_writer")
 
 
-@dataclass
-class TransformedRecord:
-    ingested_at: datetime
-    source: Optional[str]
-    event_type: Optional[str]
-    market: Optional[str]
-    asset_id: Optional[str]
-    side: Optional[str]
-    price: Optional[float]
-    size: Optional[float]
-    hash: Optional[str]
-    best_bid: Optional[float]
-    best_ask: Optional[float]
-    timestamp_ms: Optional[int]
-    raw_payload: Dict[str, Any]
-
-    def as_tuple(self) -> Tuple:
-        return (
-            self.ingested_at,
-            self.source,
-            self.event_type,
-            self.market,
-            self.asset_id,
-            self.side,
-            self.price,
-            self.size,
-            self.hash,
-            self.best_bid,
-            self.best_ask,
-            self.timestamp_ms,
-            json.dumps(self.raw_payload),
-        )
-
-
 class TransformWriter:
     """Consume Kafka events, normalise them, and batch insert into Postgres."""
 
@@ -59,7 +25,8 @@ class TransformWriter:
         self._pg_pool: Optional[asyncpg.Pool] = None
         self._pending: List[Tuple[str, Tuple]] = []
         self._stop_event = asyncio.Event()
-        self._table_price_changes = self._validate_table(settings.postgres.target_table)
+        self._table_order_book_updates = self._validate_table(settings.postgres.order_book_updates_table)
+        self._table_order_book_snapshots = self._validate_table(settings.postgres.order_book_snapshots_table)
         self._table_chainlink = self._validate_table(settings.postgres.chainlink_table)
         self._table_binance = self._validate_table(settings.postgres.binance_table)
         self._table_passthrough = self._validate_table(os.getenv("PASSTHROUGH_TABLE", "kafka_raw_events"))
@@ -149,8 +116,10 @@ class TransformWriter:
         ingested_at = datetime.now(timezone.utc)
         
 
+        if event_type == "book":
+            return self._build_snapshot_records(base)
         if event_type == "price_change":
-            return self._build_price_change_records(base, source, event_type, ingested_at)
+            return self._build_order_book_update_records(base, ingested_at)
         if source and source.lower() == "chainlink":
             return self._build_chainlink_records(base, source, ingested_at)
         if source and source.lower() == "binance":
@@ -164,11 +133,42 @@ class TransformWriter:
         )
         return []
 
-    def _build_price_change_records(
-        self, base: Dict[str, Any], source: Optional[str], event_type: Optional[str], ingested_at: datetime
-    ) -> List[Tuple[str, Tuple]]:
-        market = str(base.get("market")) if base.get("market") is not None else None
-        timestamp_ms = _to_int(base.get("timestamp"))
+    def _build_snapshot_records(self, base: Dict[str, Any]) -> List[Tuple[str, Tuple]]:
+        """Convert a full book event into snapshot rows."""
+        asset_id = _to_str(base.get("asset_id"))
+        ts = _ms_to_datetime(base.get("timestamp"))
+        if not asset_id or ts is None:
+            return []
+
+        records: List[Tuple[str, Tuple]] = []
+        for side_key, side_value in (("bids", "bid"), ("asks", "ask")):
+            levels = base.get(side_key)
+            if not isinstance(levels, list):
+                continue
+            for level in levels:
+                price = _to_float(level.get("price"))
+                size = _to_float(level.get("size"))
+                if price is None or size is None:
+                    continue
+                records.append(
+                    (
+                        self._table_order_book_snapshots,
+                        (
+                            asset_id,
+                            price,
+                            size,
+                            side_value,
+                            ts,
+                        ),
+                    )
+                )
+        return records
+
+    def _build_order_book_update_records(self, base: Dict[str, Any], ingested_at: datetime) -> List[Tuple[str, Tuple]]:
+        """Convert price_change events into order book updates."""
+        update_ts = _ms_to_datetime(base.get("timestamp"))
+        send_ts = update_ts
+        arrival_ts = ingested_at
 
         price_changes = base.get("price_changes")
         records: List[Tuple[str, Tuple]] = []
@@ -176,54 +176,54 @@ class TransformWriter:
             for change in price_changes:
                 if not isinstance(change, dict):
                     continue
-                records.append(
-                    (
-                        self._table_price_changes,
-                        TransformedRecord(
-                            ingested_at=ingested_at,
-                            source=source,
-                            event_type=event_type or "price_change",
-                            market=market,
-                            asset_id=_to_str(change.get("asset_id")),
-                            side=_to_str(change.get("side")),
-                            price=_to_float(change.get("price")),
-                            size=_to_float(change.get("size")),
-                            hash=_to_str(change.get("hash")),
-                            best_bid=_to_float(change.get("best_bid")),
-                            best_ask=_to_float(change.get("best_ask")),
-                            timestamp_ms=timestamp_ms,
-                            raw_payload=base,
-                        ).as_tuple(),
+                token_id = _to_str(change.get("asset_id"))
+                price = _to_float(change.get("price"))
+                size = _to_float(change.get("size"))
+                side = change.get("side")
+                side_value = "bid" if (isinstance(side, str) and side.upper() == "BUY") else "ask"
+                if token_id and price is not None and size is not None and update_ts is not None:
+                    records.append(
+                        (
+                            self._table_order_book_updates,
+                            (
+                                token_id,
+                                price,
+                                size,
+                                side_value,
+                                update_ts,
+                                send_ts,
+                                arrival_ts,
+                            ),
+                        )
                     )
-                )
             return records
 
-        records.append(
-            (
-                self._table_price_changes,
-                TransformedRecord(
-                    ingested_at=ingested_at,
-                    source=source,
-                    event_type=event_type,
-                    market=market,
-                    asset_id=_to_str(base.get("asset_id")),
-                    side=_to_str(base.get("side")),
-                    price=_to_float(base.get("price")),
-                    size=_to_float(base.get("size")),
-                    hash=_to_str(base.get("hash")),
-                    best_bid=_to_float(base.get("best_bid")),
-                    best_ask=_to_float(base.get("best_ask")),
-                    timestamp_ms=timestamp_ms,
-                    raw_payload=base,
-                ).as_tuple(),
+        token_id = _to_str(base.get("asset_id"))
+        price = _to_float(base.get("price"))
+        size = _to_float(base.get("size"))
+        side = base.get("side")
+        side_value = "bid" if (isinstance(side, str) and side.upper() == "BUY") else "ask"
+        if token_id and price is not None and size is not None and update_ts is not None:
+            records.append(
+                (
+                    self._table_order_book_updates,
+                    (
+                        token_id,
+                        price,
+                        size,
+                        side_value,
+                        update_ts,
+                        send_ts,
+                        arrival_ts,
+                    ),
+                )
             )
-        )
         return records
 
     def _build_chainlink_records(
         self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
     ) -> List[Tuple[str, Tuple]]:
-        payload = base if isinstance(base, dict) else {}
+        payload = base.get("payload") if isinstance(base, dict) else {}
         return [
             (
                 self._table_chainlink,
@@ -242,7 +242,7 @@ class TransformWriter:
     def _build_binance_records(
         self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
     ) -> List[Tuple[str, Tuple]]:
-        payload = base if isinstance(base, dict) else {}
+        payload = base.get("payload") if isinstance(base, dict) else {}
         return [
             (
                 self._table_binance,
@@ -283,12 +283,17 @@ class TransformWriter:
             )
 
         sql_map = {
-            self._table_price_changes: (
+            self._table_order_book_updates: (
                 "INSERT INTO "
-                f"{self._table_price_changes} "
-                "(ingested_at, source, event_type, market, asset_id, side, price, size, hash, "
-                "best_bid, best_ask, timestamp_ms, raw_payload) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+                f"{self._table_order_book_updates} "
+                "(token_id, price, size, side, update_timestamp, send_timestamp, arrival_timestamp) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            ),
+            self._table_order_book_snapshots: (
+                "INSERT INTO "
+                f"{self._table_order_book_snapshots} "
+                "(token_id, price, size, side, snapshot_timestamp) "
+                "VALUES ($1, $2, $3, $4, $5)"
             ),
             self._table_chainlink: (
                 "INSERT INTO "
@@ -345,6 +350,13 @@ def _to_str(value: object) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _ms_to_datetime(value: object) -> Optional[datetime]:
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def main() -> None:

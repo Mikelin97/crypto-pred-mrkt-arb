@@ -2,7 +2,7 @@ CREATE TABLE events (
 
     id BIGSERIAL PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
-    seried_id TEXT REFERENCES series(series_id),
+    series_id TEXT REFERENCES series(series_id),
     parent_event_id TEXT, -- sports have subevents like 'spread'
     ticker TEXT,
     slug TEXT,
