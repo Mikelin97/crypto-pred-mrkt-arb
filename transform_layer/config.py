@@ -58,7 +58,12 @@ class RedisSettings:
 @dataclass
 class PostgresSettings:
     dsn: str = os.getenv("POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/postgres")
-    target_table: str = os.getenv("TARGET_TABLE", "kafka_price_changes")
+    order_book_updates_table: str = os.getenv(
+        "ORDER_BOOK_UPDATES_TABLE", os.getenv("TARGET_TABLE", "order_book_updates")
+    )
+    order_book_snapshots_table: str = os.getenv(
+        "ORDER_BOOK_SNAPSHOTS_TABLE", "order_book_snapshots"
+    )
     chainlink_table: str = os.getenv("CHAINLINK_TABLE", "chainlink_prices")
     binance_table: str = os.getenv("BINANCE_TABLE", "binance_prices")
     persistence_query: Optional[str] = os.getenv("PERSISTENCE_QUERY")
