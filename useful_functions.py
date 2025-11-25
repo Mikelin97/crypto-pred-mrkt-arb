@@ -19,29 +19,32 @@ def binary_price(S, X, T, vol, r):
     return price
 
 
-def get_all_events(closed="false", tag_id = ''):
+def get_all_events(closed="false", tag_id='', max_events=None):
 
     """
-        Get all non-closed market events with the option to filter based on a tag_id, which is useful
+        Get all market events with the option to filter based on a tag_id.
+        If max_events is provided, stop after collecting that many.
     """
     params = {
         "closed": closed,
-        "limit" : 500,
-        "offset" : 0,
+        "limit": 500,
+        "offset": 0,
         # 'tag_id': ''
     }
     if tag_id:
-        params['tag_id'] = tag_id
+        params["tag_id"] = tag_id
 
     events = []
     r = requests.get(url="https://gamma-api.polymarket.com/events", params=params)
     response = r.json()
     while response:
         events += response
-        params['offset'] += 500
+        if max_events and len(events) >= max_events:
+            return events[:max_events]
+        params["offset"] += 500
         r = requests.get(url="https://gamma-api.polymarket.com/events", params=params)
         response = r.json()
-    
+
     return events
 # get_all_events(tag_id='102467') -> get 15 minute events, which is just the crypto up-down at the moment
 
@@ -310,5 +313,4 @@ def reconstruct_order_book(data:pd.DataFrame, asset_id, timestamp):
             order_book[row['side']][row['price']] = row['size']
     
     return order_book
-
 

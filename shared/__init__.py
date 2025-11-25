@@ -1,8 +1,43 @@
-"""Shared trading primitives that can be reused across services."""
+"""Shared trading primitives that can be reused across services.
 
-from .market import Market
-from .orderbook import OrderBook
-from .strategy import Strategy
-from .vol import Vol
+Heavy dependencies (e.g., boto3/pandas in Market) are lazily imported so modules
+that only need lightweight helpers don’t require the full dependency set.
+"""
 
-__all__ = ["Market", "OrderBook", "Strategy", "Vol"]
+__all__ = [
+    "Market",
+    "OrderBook",
+    "Strategy",
+    "Vol",
+    "ExecutionClient",
+    "ExecutionResult",
+    "RedisSubscriber",
+]
+
+
+def __getattr__(name):
+    if name == "Market":
+        from .market import Market
+
+        return Market
+    if name == "OrderBook":
+        from .orderbook import OrderBook
+
+        return OrderBook
+    if name == "Strategy":
+        from .strategy import Strategy
+
+        return Strategy
+    if name == "Vol":
+        from .vol import Vol
+
+        return Vol
+    if name in {"ExecutionClient", "ExecutionResult"}:
+        from .execution import ExecutionClient, ExecutionResult
+
+        return ExecutionClient if name == "ExecutionClient" else ExecutionResult
+    if name == "RedisSubscriber":
+        from .subscriber import RedisSubscriber
+
+        return RedisSubscriber
+    raise AttributeError(f"module 'shared' has no attribute '{name}'")

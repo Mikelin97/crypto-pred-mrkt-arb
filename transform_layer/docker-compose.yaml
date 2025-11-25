@@ -1,0 +1,91 @@
+
+services:
+  kafka:
+    image: apache/kafka-native:4.1.1
+    container_name: transform_kafka
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9092'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - KAFKA_NUM_PARTITIONS=3
+    ports:
+      # Change host port if 9092 is already taken; internal listener stays 9092.
+      - "19092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - default
+      - data_pipeline
+
+  kafka_bridge:
+    build:
+      context: ..
+      dockerfile: transform_layer/Dockerfile
+    container_name: transform_kafka_bridge
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - SERVICE=kafka_bridge
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Point at Redis in the inflow network
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_CHANNEL_PATTERNS=markets.crypto:*
+      - KAFKA_RAW_TOPIC=market.raw
+      - KAFKA_PERSIST_TOPIC=market.persisted
+      # Optional: uncomment to backfill from Postgres
+      # - POSTGRES_DSN=postgresql://postgres:postgres@persistence_postgres:5432/postgres
+      # - PERSISTENCE_QUERY=SELECT * FROM kafka_events ORDER BY ingested_at DESC LIMIT 1000
+    networks:
+      - default
+      - inflow_gateway
+      - data_pipeline
+
+  transform_writer:
+    build:
+      context: ..
+      dockerfile: transform_layer/Dockerfile
+    container_name: transform_writer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - SERVICE=transform_writer
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_RAW_TOPIC=market.raw
+      - KAFKA_PERSIST_TOPIC=market.persisted
+      - KAFKA_CONSUMER_GROUP=transform-writer
+      - POSTGRES_DSN=postgresql://postgres:postgres@persistence_postgres:5432/postgres
+      - ORDER_BOOK_UPDATES_TABLE=order_book_updates
+      - ORDER_BOOK_SNAPSHOTS_TABLE=order_book_snapshots
+      - BATCH_SIZE=500
+      - BATCH_INTERVAL_SECONDS=1.0
+    networks:
+      - default
+      - data_pipeline
+
+volumes:
+  kafka_data:
+
+networks:
+  default:
+    driver: bridge
+  inflow_gateway:
+    external: true
+  data_pipeline:
+    external: true

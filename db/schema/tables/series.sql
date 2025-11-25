@@ -6,7 +6,7 @@ CREATE TABLE series(
     slug TEXT NOT NULL,
     title TEXT,
     series_type TEXT,
-    recurrence TEXT NOT NULL,
+    recurrence TEXT,
     active BOOLEAN,
     closed BOOLEAN,
     published_at TIMESTAMPTZ(3),
