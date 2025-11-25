@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS chainlink_prices (
     symbol TEXT,
     value DOUBLE PRECISION,
     full_accuracy_value TEXT,
-    timestamp_ms BIGINT,
+    update_timestamp TIMESTAMPTZ(3) NOT NULL, -- timestamp of update
+    send_timestamp TIMESTAMPTZ(3), -- timestamp POLYMARKET SENDS US
+    arrival_timestamp TIMESTAMPTZ(3), -- timestamp we got the update
     raw_payload JSONB NOT NULL
 );

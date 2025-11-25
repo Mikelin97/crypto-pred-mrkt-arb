@@ -223,6 +223,9 @@ class TransformWriter:
         self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
     ) -> List[Tuple[str, Tuple]]:
         payload = base.get("payload") if isinstance(base, dict) else {}
+        update_ts = _ms_to_datetime(payload.get("timestamp"))
+        send_ts = _ms_to_datetime(base.get("timestamp"))
+        arrival_ts = ingested_at
         return [
             (
                 self._table_chainlink,
@@ -232,7 +235,9 @@ class TransformWriter:
                     _to_str(payload.get("symbol")),
                     _to_float(payload.get("value")),
                     _to_str(payload.get("full_accuracy_value")),
-                    _to_int(payload.get("timestamp")),
+                    update_ts,
+                    send_ts,
+                    arrival_ts,
                     json.dumps(base),
                 ),
             )
@@ -242,6 +247,9 @@ class TransformWriter:
         self, base: Dict[str, Any], source: Optional[str], ingested_at: datetime
     ) -> List[Tuple[str, Tuple]]:
         payload = base.get("payload") if isinstance(base, dict) else {}
+        update_ts = _ms_to_datetime(payload.get("timestamp"))
+        send_ts = _ms_to_datetime(base.get("timestamp"))
+        arrival_ts = ingested_at
         return [
             (
                 self._table_binance,
@@ -251,7 +259,9 @@ class TransformWriter:
                     _to_str(payload.get("symbol")),
                     _to_float(payload.get("value")),
                     _to_str(payload.get("full_accuracy_value")),
-                    _to_int(payload.get("timestamp")),
+                    update_ts,
+                    send_ts,
+                    arrival_ts,
                     json.dumps(base),
                 ),
             )
@@ -297,14 +307,14 @@ class TransformWriter:
             self._table_chainlink: (
                 "INSERT INTO "
                 f"{self._table_chainlink} "
-                "(ingested_at, source, symbol, value, full_accuracy_value, timestamp_ms, raw_payload) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                "(ingested_at, source, symbol, value, full_accuracy_value, update_timestamp, send_timestamp, arrival_timestamp, raw_payload) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
             ),
             self._table_binance: (
                 "INSERT INTO "
                 f"{self._table_binance} "
-                "(ingested_at, source, symbol, value, full_accuracy_value, timestamp_ms, raw_payload) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                "(ingested_at, source, symbol, value, full_accuracy_value, update_timestamp, send_timestamp, arrival_timestamp, raw_payload) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
             ),
         }
 
