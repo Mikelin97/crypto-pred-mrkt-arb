@@ -134,7 +134,7 @@ class TransformWriter:
         return []
 
     def _build_snapshot_records(self, base: Dict[str, Any]) -> List[Tuple[str, Tuple]]:
-        """Convert a full book event into snapshot rows."""
+        """Convert a full book event into snapshot rows with full side JSON."""
         asset_id = _to_str(base.get("asset_id"))
         ts = _ms_to_datetime(base.get("timestamp"))
         if not asset_id or ts is None:
@@ -145,23 +145,22 @@ class TransformWriter:
             levels = base.get(side_key)
             if not isinstance(levels, list):
                 continue
-            for level in levels:
-                price = _to_float(level.get("price"))
-                size = _to_float(level.get("size"))
-                if price is None or size is None:
-                    continue
-                records.append(
+            top = levels[-1] if levels else {}
+            top_price = _to_float(top.get("price"))
+            top_size = _to_float(top.get("size"))
+            records.append(
+                (
+                    self._table_order_book_snapshots,
                     (
-                        self._table_order_book_snapshots,
-                        (
-                            asset_id,
-                            price,
-                            size,
-                            side_value,
-                            ts,
-                        ),
-                    )
+                        asset_id,
+                        json.dumps(levels),
+                        side_value,
+                        top_price,
+                        top_size,
+                        ts,
+                    ),
                 )
+            )
         return records
 
     def _build_order_book_update_records(self, base: Dict[str, Any], ingested_at: datetime) -> List[Tuple[str, Tuple]]:
@@ -292,8 +291,8 @@ class TransformWriter:
             self._table_order_book_snapshots: (
                 "INSERT INTO "
                 f"{self._table_order_book_snapshots} "
-                "(token_id, price, size, side, snapshot_timestamp) "
-                "VALUES ($1, $2, $3, $4, $5)"
+                "(token_id, book, side, top_price, top_size, snapshot_timestamp) "
+                "VALUES ($1, $2, $3, $4, $5, $6)"
             ),
             self._table_chainlink: (
                 "INSERT INTO "

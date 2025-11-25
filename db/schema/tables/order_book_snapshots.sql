@@ -5,8 +5,9 @@ CREATE TABLE order_book_snapshots(
 
     id BIGSERIAL PRIMARY KEY,
     token_id TEXT NOT NULL REFERENCES tokens(token_id), -- TODO FOREIGN KEY
-    price FLOAT NOT NULL,
-    size FLOAT NOT NULL,
+    top_price FLOAT,
+    top_size FLOAT,
+    book JSONB NOT NULL,
     side TEXT NOT NULL,
     snapshot_timestamp TIMESTAMPTZ(3) NOT NULL
 );
