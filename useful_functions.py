@@ -32,6 +32,9 @@ def implied_vol_binary(S, X, T, r, price, anchor_vol, dist_weight = 10):
         
     """
     # ensure the price is within no arbitrage
+    if T == 0.0:
+        return np.nan, 0.0
+
     p_min = 0.0
     p_max = np.exp(-r * T)
     if not (p_min < price < p_max):
