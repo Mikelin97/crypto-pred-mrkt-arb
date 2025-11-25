@@ -25,6 +25,7 @@ DEFAULT_MARKET_TAG = os.getenv("DEFAULT_MARKET_TAG", "102467")
 
 MARKET_DURATION_SECONDS = int(os.getenv("MARKET_DURATION_SECONDS", str(15 * 60)))
 MARKET_START_LEAD_SECONDS = int(os.getenv("MARKET_START_LEAD_SECONDS", str(1 * 60)))
+MARKET_STREAM_RETRIES = int(os.getenv("MARKET_STREAM_RETRIES", "3"))
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 CHAINLINK_REDIS_CHANNEL = os.getenv(
@@ -241,9 +242,13 @@ async def stream_single_market(
     publisher: RedisPublisher,
     inactivity_timeout: float = 10.0,
     ping_interval: float = 10.0,
+    max_retries: int = MARKET_STREAM_RETRIES,
 ) -> None:
     redis_channel = f"{MARKET_REDIS_CHANNEL_PREFIX}:{asset_name}:{market.slug}"
-    while not stop_event.is_set():
+    attempts = 0
+
+    while not stop_event.is_set() and attempts < max_retries:
+        attempts += 1
         try:
             async with websockets.connect(MARKET_WS_URL, ping_interval=None) as ws:
                 await ws.send(json.dumps({"assets_ids": market.asset_ids, "type": "market"}))
@@ -261,7 +266,14 @@ async def stream_single_market(
                             ws.recv(), timeout=inactivity_timeout
                         )
                     except asyncio.TimeoutError:
-                        return
+                        logger.warning(
+                            "Inactivity timeout for market %s "
+                            "(attempt %s/%s); reconnecting",
+                            market.slug,
+                            attempts,
+                            max_retries,
+                        )
+                        break
 
                     if message == "PONG":
                         last_ping = dt.datetime.now()
@@ -291,19 +303,38 @@ async def stream_single_market(
                         meta["asset"] = asset_name
                     await publisher.publish(redis_channel, payload_to_publish)
 
-                return
+                if stop_event.is_set():
+                    return
         except websockets.ConnectionClosed as exc:
             logger.warning(
-                "Connection closed for market %s: %s; retrying in 2s",
+                "Connection closed for market %s (attempt %s/%s): %s; retrying in 2s",
                 market.slug,
+                attempts,
+                max_retries,
                 exc,
             )
             await asyncio.sleep(2)
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Error streaming market %s: %s; retrying in 5s", market.slug, exc
+                "Error streaming market %s (attempt %s/%s): %s; retrying in 5s",
+                market.slug,
+                attempts,
+                max_retries,
+                exc,
             )
             await asyncio.sleep(5)
+        else:
+            if stop_event.is_set():
+                return
+            if attempts < max_retries:
+                await asyncio.sleep(1)
+
+    if attempts >= max_retries and not stop_event.is_set():
+        logger.warning(
+            "Max retries reached for market %s; giving up after %s attempts",
+            market.slug,
+            max_retries,
+        )
 
 
 async def stream_markets_for_asset(
