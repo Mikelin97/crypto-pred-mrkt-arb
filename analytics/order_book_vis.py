@@ -51,23 +51,31 @@ def fetch_time_bounds(token_id: str) -> Tuple[datetime | None, datetime | None]:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_snapshots(token_id: str, start: datetime, end: datetime, limit: int) -> pd.DataFrame:
+def fetch_snapshots(token_id: str, start: datetime, end: datetime, limit: int | None, excluded_prices=None) -> pd.DataFrame:
     fetcher = get_fetcher()
     if fetcher is None:
         return pd.DataFrame()
-    df = fetcher.fetch_snapshots(token_id, start, end, limit)
+    df = fetcher.fetch_snapshots(token_id, start, end, limit, excluded_prices=excluded_prices)
     if not df.empty and "snapshot_timestamp" in df:
         df["snapshot_timestamp"] = pd.to_datetime(df["snapshot_timestamp"], utc=True, format="%Y-%m-%d %H:%M:%S.%f")
     return df
 
 
 @st.cache_data(show_spinner=False)
-def fetch_updates(token_id: str, start: datetime, end: datetime, limit: int) -> pd.DataFrame:
+def fetch_updates(token_id: str, start: datetime, end: datetime, limit: int | None, excluded_prices=None) -> pd.DataFrame:
     fetcher = get_fetcher()
     if fetcher is None:
         return pd.DataFrame()
-    df = fetcher.fetch_updates(token_id, start, end, limit, excluded_prices=EXCLUDED_PRICES)
+    df = fetcher.fetch_updates(token_id, start, end, limit, excluded_prices=excluded_prices)
     return df
+
+
+@st.cache_data(show_spinner=False)
+def fetch_tokens_for_series(series_id: str) -> pd.DataFrame:
+    fetcher = get_fetcher()
+    if fetcher is None:
+        return pd.DataFrame()
+    return fetcher.fetch_tokens_for_series(series_id)
 
 
 def build_book_at(ts: datetime, snapshots: pd.DataFrame, updates: pd.DataFrame) -> OrderBook:
@@ -168,13 +176,28 @@ def main() -> None:
         st.stop()
 
     with st.sidebar:
-        token_id = st.text_input("Token ID", help="CLOB token id to inspect")
-        lookback_minutes = st.slider("Lookback window (minutes)", min_value=1, max_value=720, value=60, step=1)
-        snapshot_limit = st.number_input("Snapshot rows", min_value=10, max_value=5000, value=500, step=10)
-        update_limit = st.number_input("Update rows", min_value=100, max_value=50000, value=5000, step=100)
+        series_id = st.text_input("Series ID", value="10192", help="Series id to expand into tokens")
+        exclude_guard = st.checkbox("Exclude 0.99 / 0.01", value=True)
+
+    tokens_df = fetch_tokens_for_series(series_id) if series_id else pd.DataFrame()
+    if tokens_df.empty:
+        st.info("Enter a valid series id to load markets and tokens.")
+        return
+
+    with st.sidebar.expander("Tokens"):
+        st.dataframe(tokens_df[["event_title", "event_slug", "market_slug", "token_id", "outcome"]], height=240, use_container_width=True)
+
+    tokens_df = tokens_df.fillna("")
+    tokens_df["label"] = tokens_df.apply(
+        lambda row: f"{row.get('event_title') or row.get('event_slug')} | {row.get('market_slug')} | {row.get('outcome')} ({row.get('token_id')})",
+        axis=1,
+    )
+    token_options = tokens_df.to_dict("records")
+    selected_token = st.sidebar.selectbox("Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
+    token_id = selected_token["token_id"] if isinstance(selected_token, dict) else None
 
     if not token_id:
-        st.info("Enter a token id to load order book data.")
+        st.info("Select a token to load order book data.")
         return
 
     min_ts, max_ts = fetch_time_bounds(token_id)
@@ -183,13 +206,13 @@ def main() -> None:
         return
 
     end_time = max_ts
-    default_start = end_time - timedelta(minutes=lookback_minutes)
-    start_time = max(default_start, min_ts) if min_ts else default_start
+    start_time = min_ts if min_ts else end_time
 
     st.caption(f"Data available from {min_ts} to {max_ts} (UTC)")
 
-    snapshots = fetch_snapshots(token_id, start_time, end_time, int(snapshot_limit))
-    updates = fetch_updates(token_id, start_time, end_time, int(update_limit))
+    excluded_prices = EXCLUDED_PRICES if exclude_guard else None
+    snapshots = fetch_snapshots(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
+    updates = fetch_updates(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
 
     if snapshots.empty and updates.empty:
         st.warning("No data in the selected window. Expand the lookback or verify the token id.")

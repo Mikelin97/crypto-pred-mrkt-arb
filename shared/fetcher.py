@@ -104,6 +104,7 @@ class Fetcher:
         *,
         snapshots_table: str = "order_book_snapshots",
         drop_empty_books: bool = True,
+        excluded_prices: Sequence[float] | None = None,
     ) -> pd.DataFrame:
         snapshots_table = self._table(snapshots_table)
         sql = f"""
@@ -124,9 +125,49 @@ class Fetcher:
             df["snapshot_timestamp"] = pd.to_datetime(df["snapshot_timestamp"], utc=True)
         if "book" in df:
             df["book"] = df["book"].apply(self._parse_book_column)
+            if excluded_prices:
+                excluded_set = {float(x) for x in excluded_prices}
+                df["book"] = df["book"].apply(
+                    lambda levels: [
+                        lvl for lvl in (levels or []) if not self._is_excluded_price(lvl.get("price"), excluded_set)
+                    ]
+                )
             if drop_empty_books:
                 df = df[df["book"].apply(self._book_has_volume)]
         return df
+
+    def fetch_tokens_for_series(
+        self,
+        series_id: str,
+        *,
+        series_table: str = "series",
+        events_table: str = "events",
+        markets_table: str = "markets",
+        tokens_table: str = "tokens",
+    ) -> pd.DataFrame:
+        series_table = self._table(series_table)
+        events_table = self._table(events_table)
+        markets_table = self._table(markets_table)
+        tokens_table = self._table(tokens_table)
+        sql = f"""
+            SELECT
+                s.series_id,
+                s.slug AS series_slug,
+                e.event_id,
+                e.slug AS event_slug,
+                e.title AS event_title,
+                m.market_id,
+                m.slug AS market_slug,
+                t.token_id,
+                t.outcome
+            FROM {series_table} s
+            JOIN {events_table} e ON e.series_id = s.series_id
+            JOIN {markets_table} m ON m.event_id = e.event_id
+            JOIN {tokens_table} t ON t.market_id = m.market_id
+            WHERE s.series_id = %(series_id)s
+            ORDER BY e.title, m.market_id, t.token_id
+        """
+        return self.query_df(sql, {"series_id": series_id})
 
     def fetch_updates(
         self,
@@ -162,6 +203,39 @@ class Fetcher:
             excluded_set = {float(x) for x in excluded_prices}
             df = df[~df["price"].apply(lambda x: self._is_excluded_price(x, excluded_set))]
         return df
+
+    def fetch_tokens_for_series(
+        self,
+        series_id: str,
+        *,
+        series_table: str = "series",
+        events_table: str = "events",
+        markets_table: str = "markets",
+        tokens_table: str = "tokens",
+    ) -> pd.DataFrame:
+        series_table = self._table(series_table)
+        events_table = self._table(events_table)
+        markets_table = self._table(markets_table)
+        tokens_table = self._table(tokens_table)
+        sql = f"""
+            SELECT
+                s.series_id,
+                s.slug AS series_slug,
+                e.event_id,
+                e.slug AS event_slug,
+                e.title AS event_title,
+                m.market_id,
+                m.slug AS market_slug,
+                t.token_id,
+                t.outcome
+            FROM {series_table} s
+            JOIN {events_table} e ON e.series_id = s.series_id
+            JOIN {markets_table} m ON m.event_id = e.event_id
+            JOIN {tokens_table} t ON t.market_id = m.market_id
+            WHERE s.series_id = %(series_id)s
+            ORDER BY e.event_id, m.market_id, t.token_id
+        """
+        return self.query_df(sql, {"series_id": series_id})
 
     def close(self) -> None:
         if self._client is not None:
