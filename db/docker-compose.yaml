@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: postgres:latest
+    image: persistence_postgres:latest
     container_name: persistence_postgres
     command: >
       postgres
