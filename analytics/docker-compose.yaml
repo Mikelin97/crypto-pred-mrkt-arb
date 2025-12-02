@@ -1,0 +1,23 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: analytics/Dockerfile
+    ports: 
+      - "8503:80"
+    env_file:
+      - .env
+    
+    container_name: poly_punt_orderbook
+    
+    networks:
+      - poly_punt_demo_network
+      - data_pipeline
+    restart: unless-stopped
+networks:
+  poly_punt_demo_network:
+    driver: bridge
+  data_pipeline:
+    external: true
+volumes:
+  poly_punt_demo_data:

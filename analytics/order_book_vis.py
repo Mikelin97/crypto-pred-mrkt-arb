@@ -9,6 +9,7 @@ from typing import Any, Tuple
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -298,106 +299,98 @@ def main() -> None:
 
     # Mid-price over time with highlight window (first chart)
     if not mid_series_df.empty:
-        try:
-            import altair as alt  # type: ignore
-        except ImportError:
-            pass
-        else:
-            mid_df = mid_series_df.dropna()
-            highlight_ts = pd.to_datetime(book_time, utc=True).floor("S")
-            window_start = highlight_ts - pd.Timedelta(seconds=5)
-            window_end = highlight_ts + pd.Timedelta(seconds=5)
-            mid_line = (
-                alt.Chart(mid_df)
-                .mark_line()
-                .encode(
-                    x=alt.X("timestamp:T", title="Time"),
-                    y=alt.Y("mid:Q", title="Mid Price"),
-                    tooltip=["timestamp:T", "mid:Q"],
-                )
+    
+        mid_df = mid_series_df.dropna()
+        highlight_ts = pd.to_datetime(book_time, utc=True).floor("S")
+        window_start = highlight_ts - pd.Timedelta(seconds=5)
+        window_end = highlight_ts + pd.Timedelta(seconds=5)
+        mid_line = (
+            alt.Chart(mid_df)
+            .mark_line()
+            .encode(
+                x=alt.X("timestamp:T", title="Time"),
+                y=alt.Y("mid:Q", title="Mid Price"),
+                tooltip=["timestamp:T", "mid:Q"],
             )
-            highlight_point = (
-                alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "mid": [mid_price]}))
-                .mark_circle(color="red", size=80)
-                .encode(x="timestamp:T", y="mid:Q")
-            )
-            window_band = (
-                alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
-                .mark_rect(opacity=0.1, color="gray")
-                .encode(x="start:T", x2="end:T")
-            )
-            mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price Over Time")
-            st.altair_chart(mid_chart, use_container_width=True)
+        )
+        highlight_point = (
+            alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "mid": [mid_price]}))
+            .mark_circle(color="red", size=80)
+            .encode(x="timestamp:T", y="mid:Q")
+        )
+        window_band = (
+            alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
+            .mark_rect(opacity=0.1, color="gray")
+            .encode(x="start:T", x2="end:T")
+        )
+        mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price Over Time")
+        st.altair_chart(mid_chart, use_container_width=True)
     # Depth and cumulative charts
     if plot_df.empty:
         st.info("No order book levels to plot at this timestamp.")
     else:
-        try:
-            import altair as alt
-        except ImportError:
-            st.error("Install `altair` to render the depth chart.")
-        else:
-            plot_df["size_abs"] = plot_df["size"].abs()
+    
+        plot_df["size_abs"] = plot_df["size"].abs()
 
-            chart = (
-                alt.Chart(plot_df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("price:Q", title="Price"),
-                    y=alt.Y("size_abs:Q", title="Size"),
-                    color=alt.Color("side:N", scale=alt.Scale(domain=["bid", "ask"], range=["#2c7be5", "#d9534f"])),
-                    tooltip=["side", "price", "size"],
-                )
-                .properties(height=420)
+        chart = (
+            alt.Chart(plot_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("price:Q", title="Price"),
+                y=alt.Y("size_abs:Q", title="Size"),
+                color=alt.Color("side:N", scale=alt.Scale(domain=["bid", "ask"], range=["#2c7be5", "#d9534f"])),
+                tooltip=["side", "price", "size"],
+            )
+            .properties(height=420)
+        )
+
+        overlays = []
+        if best_bid is not None:
+            overlays.append(
+                alt.Chart(pd.DataFrame({"price": [best_bid], "label": ["Best Bid"]}))
+                .mark_rule(color="#2c7be5", strokeDash=[4, 2])
+                .encode(x="price:Q")
+            )
+        if best_ask is not None:
+            overlays.append(
+                alt.Chart(pd.DataFrame({"price": [best_ask], "label": ["Best Ask"]}))
+                .mark_rule(color="#d9534f", strokeDash=[4, 2])
+                .encode(x="price:Q")
+            )
+        if mid_price is not None:
+            overlays.append(
+                alt.Chart(pd.DataFrame({"price": [mid_price], "label": ["Mid"]}))
+                .mark_rule(color="#6c757d")
+                .encode(x="price:Q")
             )
 
-            overlays = []
-            if best_bid is not None:
-                overlays.append(
-                    alt.Chart(pd.DataFrame({"price": [best_bid], "label": ["Best Bid"]}))
-                    .mark_rule(color="#2c7be5", strokeDash=[4, 2])
-                    .encode(x="price:Q")
+        for overlay in overlays:
+            chart = chart + overlay
+        st.altair_chart(chart, use_container_width=True)
+        # Cumulative depth around mid to gauge imbalance
+        if mid_price is not None and not pd.isna(mid_price):
+            bids_sorted = plot_df[plot_df["side"] == "bid"].sort_values("price", ascending=False).copy()
+            asks_sorted = plot_df[plot_df["side"] == "ask"].sort_values("price", ascending=True).copy()
+            bids_sorted["cum_size"] = bids_sorted["size_abs"].cumsum()
+            asks_sorted["cum_size"] = asks_sorted["size_abs"].cumsum()
+            cum_df = pd.concat([bids_sorted, asks_sorted], ignore_index=True)
+            cum_chart = (
+                alt.Chart(cum_df)
+                .mark_area(opacity=0.4)
+                .encode(
+                    x=alt.X("price:Q", title="Price"),
+                    y=alt.Y("cum_size:Q", title="Cumulative Size"),
+                    color=alt.Color("side:N", scale=alt.Scale(domain=["bid", "ask"], range=["#2c7be5", "#d9534f"])),
+                    tooltip=["side", "price", "cum_size"],
                 )
-            if best_ask is not None:
-                overlays.append(
-                    alt.Chart(pd.DataFrame({"price": [best_ask], "label": ["Best Ask"]}))
-                    .mark_rule(color="#d9534f", strokeDash=[4, 2])
-                    .encode(x="price:Q")
-                )
-            if mid_price is not None:
-                overlays.append(
-                    alt.Chart(pd.DataFrame({"price": [mid_price], "label": ["Mid"]}))
-                    .mark_rule(color="#6c757d")
-                    .encode(x="price:Q")
-                )
-
-            for overlay in overlays:
-                chart = chart + overlay
-            st.altair_chart(chart, use_container_width=True)
-            # Cumulative depth around mid to gauge imbalance
-            if mid_price is not None and not pd.isna(mid_price):
-                bids_sorted = plot_df[plot_df["side"] == "bid"].sort_values("price", ascending=False).copy()
-                asks_sorted = plot_df[plot_df["side"] == "ask"].sort_values("price", ascending=True).copy()
-                bids_sorted["cum_size"] = bids_sorted["size_abs"].cumsum()
-                asks_sorted["cum_size"] = asks_sorted["size_abs"].cumsum()
-                cum_df = pd.concat([bids_sorted, asks_sorted], ignore_index=True)
-                cum_chart = (
-                    alt.Chart(cum_df)
-                    .mark_area(opacity=0.4)
-                    .encode(
-                        x=alt.X("price:Q", title="Price"),
-                        y=alt.Y("cum_size:Q", title="Cumulative Size"),
-                        color=alt.Color("side:N", scale=alt.Scale(domain=["bid", "ask"], range=["#2c7be5", "#d9534f"])),
-                        tooltip=["side", "price", "cum_size"],
-                    )
-                    .properties(height=260, title="Cumulative Depth (centered at mid)")
-                )
-                mid_rule = (
-                    alt.Chart(pd.DataFrame({"price": [mid_price]}))
-                    .mark_rule(color="#6c757d", strokeDash=[4, 2])
-                    .encode(x="price:Q")
-                )
-                st.altair_chart(cum_chart + mid_rule, use_container_width=True)
+                .properties(height=260, title="Cumulative Depth (centered at mid)")
+            )
+            mid_rule = (
+                alt.Chart(pd.DataFrame({"price": [mid_price]}))
+                .mark_rule(color="#6c757d", strokeDash=[4, 2])
+                .encode(x="price:Q")
+            )
+            st.altair_chart(cum_chart + mid_rule, use_container_width=True)
     st.subheader("Loaded data")
     stats = f"{len(snapshots)} snapshots, {len(updates)} updates between {start_time} and {end_time}."
     st.caption(stats)

@@ -112,7 +112,7 @@ class Fetcher:
             FROM {snapshots_table}
             WHERE token_id = %(token_id)s
               AND snapshot_timestamp BETWEEN %(start)s AND %(end)s
-            ORDER BY snapshot_timestamp ASC
+            ORDER BY (token_id, snapshot_timestamp) ASC
         """
         params = {"token_id": token_id, "start": start, "end": end}
         if limit is not None:
@@ -185,7 +185,7 @@ class Fetcher:
             FROM {updates_table}
             WHERE token_id = %(token_id)s
               AND update_timestamp BETWEEN %(start)s AND %(end)s
-            ORDER BY update_timestamp ASC
+            ORDER BY (token_id, update_timestamp) ASC
         """
         params = {"token_id": token_id, "start": start, "end": end}
         if limit is not None:
