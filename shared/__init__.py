@@ -12,6 +12,7 @@ __all__ = [
     "ExecutionClient",
     "ExecutionResult",
     "RedisSubscriber",
+    "Fetcher",
 ]
 
 
@@ -40,4 +41,8 @@ def __getattr__(name):
         from .subscriber import RedisSubscriber
 
         return RedisSubscriber
+    if name == "Fetcher":
+        from .fetcher import Fetcher
+
+        return Fetcher
     raise AttributeError(f"module 'shared' has no attribute '{name}'")
