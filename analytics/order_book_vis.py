@@ -78,6 +78,39 @@ def fetch_tokens_for_series(series_id: str) -> pd.DataFrame:
     return fetcher.fetch_tokens_for_series(series_id)
 
 
+def _top_mid_series(snapshots: pd.DataFrame) -> pd.DataFrame:
+    """Compute volume-weighted mid using top bid/ask from snapshots."""
+    if snapshots.empty:
+        return pd.DataFrame(columns=["timestamp", "mid"])
+    records = []
+    for ts, group in snapshots.groupby("snapshot_timestamp"):
+        ts_floor = pd.to_datetime(ts, utc=True).floor("S")
+        bid = group[group["side"] == "bid"]
+        ask = group[group["side"] == "ask"]
+        if bid.empty or ask.empty:
+            continue
+        bid_price = bid["top_price"].iloc[0]
+        bid_size = bid["top_size"].iloc[0]
+        ask_price = ask["top_price"].iloc[0]
+        ask_size = ask["top_size"].iloc[0]
+        try:
+            bid_p = float(bid_price)
+            bid_s = float(bid_size)
+            ask_p = float(ask_price)
+            ask_s = float(ask_size)
+        except (TypeError, ValueError):
+            continue
+        if bid_s <= 0 or ask_s <= 0:
+            continue
+        mid = (bid_p * ask_s + ask_p * bid_s) / (bid_s + ask_s)
+        records.append({"timestamp": ts_floor, "mid": mid})
+    if not records:
+        return pd.DataFrame(columns=["timestamp", "mid"])
+    df = pd.DataFrame(records)
+    df = df.groupby("timestamp", as_index=False)["mid"].mean()
+    return df.sort_values("timestamp")
+
+
 def build_book_at(ts: datetime, snapshots: pd.DataFrame, updates: pd.DataFrame) -> OrderBook:
     book = OrderBook()
     base_ts: datetime | None = None
@@ -155,6 +188,8 @@ def _format_book_for_display(book: Any, *, max_levels: int = 5) -> str:
         except json.JSONDecodeError:
             return book
     levels = list(book) if isinstance(book, (list, tuple)) else []
+    ## invert the order of book levels for display (so best prices appear first)
+    levels = levels[::-1]
     if not levels:
         return ""
     parts = []
@@ -233,6 +268,7 @@ def main() -> None:
     def _fmt_ts(ts: datetime) -> str:
         return ts.strftime("%Y-%m-%d %H:%M:%S.%f")
 
+    mid_series_df = _top_mid_series(snapshots)
     book_time = st.select_slider(
         "Book timestamp (UTC)",
         options=slider_options,
@@ -240,8 +276,14 @@ def main() -> None:
         format_func=_fmt_ts,
     )
 
+    st.write(f"Selected timestamp: {_fmt_ts(book_time)}")
     book = build_book_at(book_time, snapshots, updates)
     plot_df = book_to_frame(book)
+    mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
+    book_time_floor = pd.to_datetime(book_time, utc=True).floor("S")
+    mid_price = mid_lookup.get(book_time_floor)
+    if mid_price is None and (book.bids and book.asks):
+        mid_price = book.mid
 
     metrics = st.columns(3)
     best_bid = book.best_bid if book.bids else None
@@ -254,6 +296,39 @@ def main() -> None:
         spread = book.spread if (book.bids and book.asks) else None
         st.metric("Spread", f"{spread:.4f}" if spread is not None else "—")
 
+    # Mid-price over time with highlight window (first chart)
+    if not mid_series_df.empty:
+        try:
+            import altair as alt  # type: ignore
+        except ImportError:
+            pass
+        else:
+            mid_df = mid_series_df.dropna()
+            highlight_ts = pd.to_datetime(book_time, utc=True).floor("S")
+            window_start = highlight_ts - pd.Timedelta(seconds=5)
+            window_end = highlight_ts + pd.Timedelta(seconds=5)
+            mid_line = (
+                alt.Chart(mid_df)
+                .mark_line()
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("mid:Q", title="Mid Price"),
+                    tooltip=["timestamp:T", "mid:Q"],
+                )
+            )
+            highlight_point = (
+                alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "mid": [mid_price]}))
+                .mark_circle(color="red", size=80)
+                .encode(x="timestamp:T", y="mid:Q")
+            )
+            window_band = (
+                alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
+                .mark_rect(opacity=0.1, color="gray")
+                .encode(x="start:T", x2="end:T")
+            )
+            mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price Over Time")
+            st.altair_chart(mid_chart, use_container_width=True)
+    # Depth and cumulative charts
     if plot_df.empty:
         st.info("No order book levels to plot at this timestamp.")
     else:
@@ -263,7 +338,6 @@ def main() -> None:
             st.error("Install `altair` to render the depth chart.")
         else:
             plot_df["size_abs"] = plot_df["size"].abs()
-            mid_price = book.mid if (book.bids and book.asks) else None
 
             chart = (
                 alt.Chart(plot_df)
@@ -300,7 +374,30 @@ def main() -> None:
             for overlay in overlays:
                 chart = chart + overlay
             st.altair_chart(chart, use_container_width=True)
-    st.write(plot_df)
+            # Cumulative depth around mid to gauge imbalance
+            if mid_price is not None and not pd.isna(mid_price):
+                bids_sorted = plot_df[plot_df["side"] == "bid"].sort_values("price", ascending=False).copy()
+                asks_sorted = plot_df[plot_df["side"] == "ask"].sort_values("price", ascending=True).copy()
+                bids_sorted["cum_size"] = bids_sorted["size_abs"].cumsum()
+                asks_sorted["cum_size"] = asks_sorted["size_abs"].cumsum()
+                cum_df = pd.concat([bids_sorted, asks_sorted], ignore_index=True)
+                cum_chart = (
+                    alt.Chart(cum_df)
+                    .mark_area(opacity=0.4)
+                    .encode(
+                        x=alt.X("price:Q", title="Price"),
+                        y=alt.Y("cum_size:Q", title="Cumulative Size"),
+                        color=alt.Color("side:N", scale=alt.Scale(domain=["bid", "ask"], range=["#2c7be5", "#d9534f"])),
+                        tooltip=["side", "price", "cum_size"],
+                    )
+                    .properties(height=260, title="Cumulative Depth (centered at mid)")
+                )
+                mid_rule = (
+                    alt.Chart(pd.DataFrame({"price": [mid_price]}))
+                    .mark_rule(color="#6c757d", strokeDash=[4, 2])
+                    .encode(x="price:Q")
+                )
+                st.altair_chart(cum_chart + mid_rule, use_container_width=True)
     st.subheader("Loaded data")
     stats = f"{len(snapshots)} snapshots, {len(updates)} updates between {start_time} and {end_time}."
     st.caption(stats)
