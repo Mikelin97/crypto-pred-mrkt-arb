@@ -4,7 +4,7 @@ import logging
 import os
 import signal
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
@@ -24,6 +24,7 @@ class TransformWriter:
         self._consumer: Optional[AIOKafkaConsumer] = None
         self._pg_pool: Optional[asyncpg.Pool] = None
         self._pending: List[Tuple[str, Tuple]] = []
+        self._deferred_fk: List[Tuple[str, Tuple, datetime]] = []
         self._stop_event = asyncio.Event()
         self._table_order_book_updates = self._validate_table(settings.postgres.order_book_updates_table)
         self._table_order_book_snapshots = self._validate_table(settings.postgres.order_book_snapshots_table)
@@ -277,9 +278,25 @@ class TransformWriter:
                 await self._flush()
 
     async def _flush(self) -> None:
-        if not self._pending or not self._pg_pool:
+        if not self._pg_pool:
             return
-        records = self._pending
+        now = datetime.now(timezone.utc)
+
+        # Pull in any deferred FK-violating rows that are ready to retry.
+        ready_deferred: List[Tuple[str, Tuple]] = []
+        if self._deferred_fk:
+            still_waiting: List[Tuple[str, Tuple, datetime]] = []
+            for table, row, retry_at in self._deferred_fk:
+                if retry_at <= now:
+                    ready_deferred.append((table, row))
+                else:
+                    still_waiting.append((table, row, retry_at))
+            self._deferred_fk = still_waiting
+
+        if not self._pending and not ready_deferred:
+            return
+
+        records = self._pending + ready_deferred
         self._pending = []
 
         grouped: Dict[str, List[Tuple]] = {}
@@ -318,17 +335,73 @@ class TransformWriter:
             ),
         }
 
+        retry_records: List[Tuple[str, Tuple]] = []
+        deferred_fk_records = 0
+        success_counts: Dict[str, int] = {}
+
         try:
             async with self._pg_pool.acquire() as conn:
                 for table, rows in grouped.items():
                     if table not in sql_map:
                         logger.warning("No SQL mapping for table %s; skipping %d rows", table, len(rows))
                         continue
-                    await conn.executemany(sql_map[table], rows)
+                    try:
+                        async with conn.transaction():
+                            await conn.executemany(sql_map[table], rows)
+                        success_counts[table] = success_counts.get(table, 0) + len(rows)
+                    except asyncpg.exceptions.ForeignKeyViolationError as exc:
+                        retry_at = now + timedelta(seconds=self.settings.batch.fk_retry_backoff_seconds)
+                        self._deferred_fk.extend((table, row, retry_at) for row in rows)
+                        deferred_fk_records += len(rows)
+                        logger.warning(
+                            "Deferred %d rows for table %s due to foreign key violation (next retry after %s): %s; first_row=%s",
+                            len(rows),
+                            table,
+                            retry_at.isoformat(),
+                            exc,
+                            rows[0] if rows else None,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "Failed to flush %d rows into %s (transaction rolled back): %s",
+                            len(rows),
+                            table,
+                            exc,
+                        )
+                        retry_records.extend((table, row) for row in rows)
+
+            if success_counts:
+                logger.info("Inserted rows by table (not yet committed): %s", success_counts)
+
+            if retry_records:
+                self._pending = retry_records + self._pending
+                logger.warning(
+                    "Re-queued %d rows for immediate retry; pending buffer size now %d",
+                    len(retry_records),
+                    len(self._pending),
+                )
+                return
+
             if self._consumer:
                 await self._consumer.commit()
+
+            if self._deferred_fk:
+                next_retry = min((retry_at for _, _, retry_at in self._deferred_fk), default=None)
+                pending_total = len(self._pending) + len(self._deferred_fk)
+                logger.info(
+                    "Committed offsets after inserting %d rows; deferred %d rows awaiting FK backfill (next retry %s); pending buffer size %d",
+                    sum(success_counts.values()) if success_counts else 0,
+                    deferred_fk_records,
+                    next_retry.isoformat() if next_retry else "n/a",
+                    pending_total,
+                )
+                return
+
+            flushed = sum(success_counts.values()) if success_counts else 0
             logger.info(
-                "Flushed %d records across %d tables", sum(len(rows) for rows in grouped.values()), len(grouped)
+                "Flushed %d records across %d tables; committed offsets",
+                flushed,
+                len(success_counts) if success_counts else len(grouped),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to flush %d records: %s", len(records), exc)

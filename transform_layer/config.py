@@ -76,6 +76,7 @@ class BatchSettings:
     batch_size: int = _get_int("BATCH_SIZE", 500)
     batch_interval_seconds: float = _get_float("BATCH_INTERVAL_SECONDS", 1.0)
     insert_timeout_seconds: float = _get_float("INSERT_TIMEOUT_SECONDS", 5.0)
+    fk_retry_backoff_seconds: float = _get_float("FK_RETRY_BACKOFF_SECONDS", 3600.0)
 
 
 @dataclass
