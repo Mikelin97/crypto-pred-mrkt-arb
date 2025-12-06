@@ -379,6 +379,17 @@ def main() -> None:
                 strike_row = strike_before.iloc[-1]
         strike_price_value = strike_row["price"] if strike_row is not None else None
         strike_price_ts = strike_row["timestamp"] if strike_row is not None else strike_ts
+        resolve_ts = strike_ts + pd.Timedelta(minutes=15)
+        resolve_row = None
+        resolve_after = cl_df[cl_df["timestamp"] >= resolve_ts]
+        if not resolve_after.empty:
+            resolve_row = resolve_after.iloc[0]
+        else:
+            resolve_before = cl_df[cl_df["timestamp"] <= resolve_ts]
+            if not resolve_before.empty:
+                resolve_row = resolve_before.iloc[-1]
+        resolve_price_value = resolve_row["price"] if resolve_row is not None else None
+        resolve_price_ts = resolve_row["timestamp"] if resolve_row is not None else resolve_ts
 
         price_min = cl_df["price"].min()
         price_max = cl_df["price"].max()
@@ -388,7 +399,13 @@ def main() -> None:
 
         warmup_band = (
             alt.Chart(pd.DataFrame({"start": [chainlink_start_time], "end": [strike_reference_time]}))
-            .mark_rect(opacity=0.08, color="#b0c4de")
+            .mark_rect(opacity=0.1, color="#b0c4de")
+            .encode(x="start:T", x2="end:T")
+        )
+        resolve_band_start = resolve_price_ts if resolve_price_ts is not None else resolve_ts
+        post_resolve_band = (
+            alt.Chart(pd.DataFrame({"start": [resolve_band_start], "end": [end_time]}))
+            .mark_rect(opacity=0.1, color="#f4d8cd")
             .encode(x="start:T", x2="end:T")
         )
 
@@ -416,10 +433,35 @@ def main() -> None:
         strike_label = "Strike price"
         if strike_label_ts is not None and not pd.isna(strike_label_ts):
             strike_label = f"Strike price ({strike_label_ts.strftime('%Y-%m-%d %H:%M:%S %Z')})"
-        price_summary = st.columns(2)
+        resolve_text = (
+            f"{resolve_price_value:.2f}"
+            if resolve_price_value is not None and not pd.isna(resolve_price_value)
+            else "—"
+        )
+        resolve_label_ts = None
+        try:
+            resolve_label_ts = (
+                resolve_price_ts.tz_convert("UTC") if hasattr(resolve_price_ts, "tz_convert") else resolve_price_ts
+            )
+        except Exception:
+            resolve_label_ts = resolve_price_ts
+        resolve_label = "Resolve price"
+        if resolve_label_ts is not None and not pd.isna(resolve_label_ts):
+            resolve_label = f"Resolve price ({resolve_label_ts.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+        price_summary = st.columns(3)
         with price_summary[0]:
             st.metric(strike_label, strike_text)
         with price_summary[1]:
+            st.metric(
+                resolve_label,
+                resolve_text,
+                delta=(
+                    None
+                    if resolve_price_value is None or strike_price_value is None
+                    else f"{resolve_price_value - strike_price_value:+.2f}"
+                ),
+            )
+        with price_summary[2]:
             st.metric("Price at selection", highlight_text, delta=None if delta_price is None else f"{delta_price:+.2f}")
 
         chainlink_line = (
@@ -431,7 +473,7 @@ def main() -> None:
                 tooltip=["timestamp:T", "price:Q"],
             )
         )
-        overlays = warmup_band + highlight_window + chainlink_line
+        overlays = warmup_band + post_resolve_band + highlight_window + chainlink_line
         if strike_price_value is not None:
             strike_rule = (
                 alt.Chart(pd.DataFrame({"price": [strike_price_value]}))
@@ -444,6 +486,12 @@ def main() -> None:
                 .mark_circle(color="#264653", size=70)
                 .encode(x="timestamp:T", y="price:Q")
             )
+        if resolve_price_value is not None:
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [resolve_price_ts], "price": [resolve_price_value]}))
+                .mark_circle(color="#2a9d8f", size=70)
+                .encode(x="timestamp:T", y="price:Q")
+            )
         if price_at_ts is not None:
             overlays = overlays + (
                 alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "price": [price_at_ts]}))
@@ -454,6 +502,8 @@ def main() -> None:
         st.altair_chart(chainlink_chart, use_container_width=True)
         if strike_price_value is not None:
             st.caption(f"Strike price (Chainlink at {strike_price_ts} UTC): {strike_price_value:.2f}")
+        if resolve_price_value is not None:
+            st.caption(f"Resolve price (+15m at {resolve_price_ts} UTC): {resolve_price_value:.2f}")
     else:
         st.info("No Chainlink BTC/USD price data available in this window.")
 
