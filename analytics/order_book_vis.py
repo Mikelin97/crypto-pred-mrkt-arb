@@ -11,7 +11,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -19,12 +18,22 @@ if str(REPO_ROOT) not in sys.path:
 from shared.orderbook import OrderBook
 from shared.fetcher import Fetcher
 
+
+PLAYBACK_GRANULARITY = {
+    "By tick": "tick",
+    "1 second buckets": "1s",
+    "5 second buckets": "5s",
+}
+
+
+
+
 EXCLUDED_PRICES = {0.99, 0.01}
+CHAINLINK_BTC_SYMBOL = "btc/usd"
 
 
 st.set_page_config(page_title="Order Book Visualizer", layout="wide")
 st.title("Order Book Visualizer")
-st.caption("Inspect ClickHouse order book snapshots and updates for a token, then scrub through time.")
 
 
 def _to_float(value: Any) -> float | None:
@@ -72,6 +81,14 @@ def fetch_updates(token_id: str, start: datetime, end: datetime, limit: int | No
 
 
 @st.cache_data(show_spinner=False)
+def fetch_chainlink_prices(symbol: str, start: datetime, end: datetime, limit: int | None = None) -> pd.DataFrame:
+    fetcher = get_fetcher()
+    if fetcher is None:
+        return pd.DataFrame()
+    return fetcher.fetch_chainlink_prices(symbol, start, end, limit)
+
+
+@st.cache_data(show_spinner=False)
 def fetch_tokens_for_series(series_id: str) -> pd.DataFrame:
     fetcher = get_fetcher()
     if fetcher is None:
@@ -85,7 +102,7 @@ def _top_mid_series(snapshots: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp", "mid"])
     records = []
     for ts, group in snapshots.groupby("snapshot_timestamp"):
-        ts_floor = pd.to_datetime(ts, utc=True).floor("S")
+        ts_floor = pd.to_datetime(ts, utc=True).floor("s")
         bid = group[group["side"] == "bid"]
         ask = group[group["side"] == "ask"]
         if bid.empty or ask.empty:
@@ -103,7 +120,7 @@ def _top_mid_series(snapshots: pd.DataFrame) -> pd.DataFrame:
             continue
         if bid_s <= 0 or ask_s <= 0:
             continue
-        mid = (bid_p * ask_s + ask_p * bid_s) / (bid_s + ask_s)
+        mid = round((bid_p * ask_s + ask_p * bid_s) / (bid_s + ask_s), 4)
         records.append({"timestamp": ts_floor, "mid": mid})
     if not records:
         return pd.DataFrame(columns=["timestamp", "mid"])
@@ -205,6 +222,33 @@ def _format_book_for_display(book: Any, *, max_levels: int = 5) -> str:
     return " | ".join(parts)
 
 
+def _build_slider_options(timeline_series: list[pd.Series], granularity: str) -> list[datetime]:
+    """Build slider positions based on chosen playback granularity."""
+    if not timeline_series:
+        return []
+    all_times = pd.concat(timeline_series).dropna()
+    if all_times.empty:
+        return []
+    if granularity == "tick":
+        return all_times.drop_duplicates().sort_values().to_list()
+    freq = "1s" if granularity == "1s" else "5s"
+    bucket_starts = all_times.dt.floor(freq)
+    unique_starts = bucket_starts.drop_duplicates().sort_values()
+    bucket_ends = unique_starts + pd.Timedelta(freq) - pd.Timedelta(microseconds=1)
+    return bucket_ends.to_list()
+
+
+def _start_from_market_slug(slug: str | None) -> datetime | None:
+    """Extract the market start time from a slug formatted like btc-updown-15m-<epoch>."""
+    if not slug:
+        return None
+    try:
+        epoch = int(slug.removesuffix(".jsonl").split("-")[-1])
+    except (ValueError, AttributeError):
+        return None
+    return pd.to_datetime(epoch, unit="s", utc=True)
+
+
 def main() -> None:
     fetcher = get_fetcher()
     if fetcher is None:
@@ -214,6 +258,13 @@ def main() -> None:
     with st.sidebar:
         series_id = st.text_input("Series ID", value="10192", help="Series id to expand into tokens")
         exclude_guard = st.checkbox("Exclude 0.99 / 0.01", value=True)
+        granularity_label = st.radio(
+            "Book playback granularity",
+            list(PLAYBACK_GRANULARITY.keys()),
+            index=0,
+            help="Choose how the playback slider advances through the book timeline.",
+        )
+        playback_granularity = PLAYBACK_GRANULARITY[granularity_label]
 
     tokens_df = fetch_tokens_for_series(series_id) if series_id else pd.DataFrame()
     if tokens_df.empty:
@@ -221,16 +272,20 @@ def main() -> None:
         return
 
     with st.sidebar.expander("Tokens"):
-        st.dataframe(tokens_df[["event_title", "event_slug", "market_slug", "token_id", "outcome"]], height=240, use_container_width=True)
+        st.dataframe(tokens_df[["event_title", "market_slug", "token_id", "outcome", "snapshot_count", "update_count"]], height=240, width='stretch')
 
     tokens_df = tokens_df.fillna("")
+    tokens_df = tokens_df[(tokens_df["snapshot_count"] > 0) | (tokens_df["update_count"] > 0)]
     tokens_df["label"] = tokens_df.apply(
-        lambda row: f"{row.get('event_title') or row.get('event_slug')} | {row.get('market_slug')} | {row.get('outcome')} ({row.get('token_id')})",
+        lambda row: f"{row.get('event_title').split('-')[1]} | {row.get('outcome')} | #snapshot: {row.get('snapshot_count')} #update: {row.get('update_count')}",
         axis=1,
     )
+    market_name = tokens_df["event_title"].iloc[0].split("-")[0] if "event_title" in tokens_df.columns else "Market"
     token_options = tokens_df.to_dict("records")
-    selected_token = st.sidebar.selectbox("Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
+    selected_token = st.sidebar.selectbox(f"{market_name}Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
     token_id = selected_token["token_id"] if isinstance(selected_token, dict) else None
+
+    st.write(f"__Event: {selected_token['event_title']} | Market Slug: {selected_token['market_slug']} | Token Id: {token_id}__")
 
     if not token_id:
         st.info("Select a token to load order book data.")
@@ -243,12 +298,16 @@ def main() -> None:
 
     end_time = max_ts
     start_time = min_ts if min_ts else end_time
+    slug_start_time = _start_from_market_slug(selected_token.get("market_slug"))
+    strike_reference_time = slug_start_time if slug_start_time is not None else start_time
+    chainlink_start_time = strike_reference_time - timedelta(minutes=5)
 
     st.caption(f"Data available from {min_ts} to {max_ts} (UTC)")
 
     excluded_prices = EXCLUDED_PRICES if exclude_guard else None
     snapshots = fetch_snapshots(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
     updates = fetch_updates(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
+    chainlink_prices_df = fetch_chainlink_prices(CHAINLINK_BTC_SYMBOL, chainlink_start_time, end_time)
 
     if snapshots.empty and updates.empty:
         st.warning("No data in the selected window. Expand the lookback or verify the token id.")
@@ -261,8 +320,9 @@ def main() -> None:
     if not updates.empty:
         timeline_series.append(updates["update_timestamp"])
     if timeline_series:
-        all_times = pd.concat(timeline_series).dropna().drop_duplicates().sort_values()
-        slider_options = all_times.tolist()
+        slider_options = _build_slider_options(timeline_series, playback_granularity)
+        if not slider_options:
+            slider_options = [start_time, end_time]
     else:
         slider_options = [start_time, end_time]
 
@@ -276,15 +336,177 @@ def main() -> None:
         value=slider_options[-1],
         format_func=_fmt_ts,
     )
+    highlight_ts = pd.to_datetime(book_time, utc=True).floor("s")
+    window_start = highlight_ts - pd.Timedelta(seconds=5)
+    window_end = highlight_ts + pd.Timedelta(seconds=5)
+    highlight_window = (
+        alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
+        .mark_rect(opacity=0.1, color="gray")
+        .encode(x="start:T", x2="end:T")
+    )
 
-    st.write(f"Selected timestamp: {_fmt_ts(book_time)}")
+    st.write(f"Selected timestamp: {_fmt_ts(book_time)} ({granularity_label})")
     book = build_book_at(book_time, snapshots, updates)
     plot_df = book_to_frame(book)
-    mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
-    book_time_floor = pd.to_datetime(book_time, utc=True).floor("S")
-    mid_price = mid_lookup.get(book_time_floor)
-    if mid_price is None and (book.bids and book.asks):
-        mid_price = book.mid
+    mid_price = None
+    if book.bids and book.asks:
+        mid_price = book.vmid
+
+    if mid_price is None:
+        mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
+        mid_price = mid_lookup.get(highlight_ts)
+
+    # Chainlink BTC/USD price with the same highlight window
+    if not chainlink_prices_df.empty:
+        cl_df = (
+            chainlink_prices_df.rename(columns={"update_timestamp": "timestamp", "value": "price"})
+            .dropna(subset=["price"])
+            .sort_values("timestamp")
+        )
+        price_at_ts = None
+        upto_highlight = cl_df[cl_df["timestamp"] <= highlight_ts]
+        if not upto_highlight.empty:
+            price_at_ts = upto_highlight.iloc[-1]["price"]
+
+        strike_ts = pd.to_datetime(strike_reference_time, utc=True)
+        strike_row = None
+        strike_after = cl_df[cl_df["timestamp"] >= strike_ts]
+        if not strike_after.empty:
+            strike_row = strike_after.iloc[0]
+        else:
+            strike_before = cl_df[cl_df["timestamp"] <= strike_ts]
+            if not strike_before.empty:
+                strike_row = strike_before.iloc[-1]
+        strike_price_value = strike_row["price"] if strike_row is not None else None
+        strike_price_ts = strike_row["timestamp"] if strike_row is not None else strike_ts
+        resolve_ts = strike_ts + pd.Timedelta(minutes=15)
+        resolve_row = None
+        resolve_after = cl_df[cl_df["timestamp"] >= resolve_ts]
+        if not resolve_after.empty:
+            resolve_row = resolve_after.iloc[0]
+        else:
+            resolve_before = cl_df[cl_df["timestamp"] <= resolve_ts]
+            if not resolve_before.empty:
+                resolve_row = resolve_before.iloc[-1]
+        resolve_price_value = resolve_row["price"] if resolve_row is not None else None
+        resolve_price_ts = resolve_row["timestamp"] if resolve_row is not None else resolve_ts
+
+        price_min = cl_df["price"].min()
+        price_max = cl_df["price"].max()
+        price_span = price_max - price_min
+        pad = max(price_span * 0.1, max(abs(price_max), 1) * 0.0005)
+        y_domain = [price_min - pad, price_max + pad]
+
+        warmup_band = (
+            alt.Chart(pd.DataFrame({"start": [chainlink_start_time], "end": [strike_reference_time]}))
+            .mark_rect(opacity=0.1, color="#b0c4de")
+            .encode(x="start:T", x2="end:T")
+        )
+        resolve_band_start = resolve_price_ts if resolve_price_ts is not None else resolve_ts
+        post_resolve_band = (
+            alt.Chart(pd.DataFrame({"start": [resolve_band_start], "end": [end_time]}))
+            .mark_rect(opacity=0.1, color="#f4d8cd")
+            .encode(x="start:T", x2="end:T")
+        )
+
+        strike_text = (
+            f"{strike_price_value:.2f}"
+            if strike_price_value is not None and not pd.isna(strike_price_value)
+            else "—"
+        )
+        highlight_text = f"{price_at_ts:.2f}" if price_at_ts is not None and not pd.isna(price_at_ts) else "—"
+        delta_price = None
+        if (
+            strike_price_value is not None
+            and price_at_ts is not None
+            and not pd.isna(strike_price_value)
+            and not pd.isna(price_at_ts)
+        ):
+            delta_price = price_at_ts - strike_price_value
+        strike_label_ts = None
+        try:
+            strike_label_ts = (
+                strike_price_ts.tz_convert("UTC") if hasattr(strike_price_ts, "tz_convert") else strike_price_ts
+            )
+        except Exception:
+            strike_label_ts = strike_price_ts
+        strike_label = "Strike price"
+        if strike_label_ts is not None and not pd.isna(strike_label_ts):
+            strike_label = f"Strike price ({strike_label_ts.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+        resolve_text = (
+            f"{resolve_price_value:.2f}"
+            if resolve_price_value is not None and not pd.isna(resolve_price_value)
+            else "—"
+        )
+        resolve_label_ts = None
+        try:
+            resolve_label_ts = (
+                resolve_price_ts.tz_convert("UTC") if hasattr(resolve_price_ts, "tz_convert") else resolve_price_ts
+            )
+        except Exception:
+            resolve_label_ts = resolve_price_ts
+        resolve_label = "Resolve price"
+        if resolve_label_ts is not None and not pd.isna(resolve_label_ts):
+            resolve_label = f"Resolve price ({resolve_label_ts.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+        price_summary = st.columns(3)
+        with price_summary[0]:
+            st.metric(strike_label, strike_text)
+        with price_summary[1]:
+            st.metric(
+                resolve_label,
+                resolve_text,
+                delta=(
+                    None
+                    if resolve_price_value is None or strike_price_value is None
+                    else f"{resolve_price_value - strike_price_value:+.2f}"
+                ),
+            )
+        with price_summary[2]:
+            st.metric("Price at selection", highlight_text, delta=None if delta_price is None else f"{delta_price:+.2f}")
+
+        chainlink_line = (
+            alt.Chart(cl_df)
+            .mark_line(color="#f4a261")
+            .encode(
+                x=alt.X("timestamp:T", title="Time"),
+                y=alt.Y("price:Q", title="Chainlink BTC/USD Price", scale=alt.Scale(domain=y_domain, zero=False)),
+                tooltip=["timestamp:T", "price:Q"],
+            )
+        )
+        overlays = warmup_band + post_resolve_band + highlight_window + chainlink_line
+        if strike_price_value is not None:
+            strike_rule = (
+                alt.Chart(pd.DataFrame({"price": [strike_price_value]}))
+                .mark_rule(color="#264653", strokeDash=[6, 3])
+                .encode(y="price:Q")
+            )
+            overlays = overlays + strike_rule
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [strike_price_ts], "price": [strike_price_value]}))
+                .mark_circle(color="#264653", size=70)
+                .encode(x="timestamp:T", y="price:Q")
+            )
+        if resolve_price_value is not None:
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [resolve_price_ts], "price": [resolve_price_value]}))
+                .mark_circle(color="#2a9d8f", size=70)
+                .encode(x="timestamp:T", y="price:Q")
+            )
+        if price_at_ts is not None:
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "price": [price_at_ts]}))
+                .mark_circle(color="#e76f51", size=80)
+                .encode(x="timestamp:T", y="price:Q")
+            )
+        chainlink_chart = overlays.properties(height=300, title="Chainlink BTC/USD Price (start extended +5m)")
+        st.altair_chart(chainlink_chart, use_container_width=True)
+        if strike_price_value is not None:
+            st.caption(f"Strike price (Chainlink at {strike_price_ts} UTC): {strike_price_value:.2f}")
+        if resolve_price_value is not None:
+            st.caption(f"Resolve price (+15m at {resolve_price_ts} UTC): {resolve_price_value:.2f}")
+    else:
+        st.info("No Chainlink BTC/USD price data available in this window.")
+
 
     metrics = st.columns(3)
     best_bid = book.best_bid if book.bids else None
@@ -301,9 +523,6 @@ def main() -> None:
     if not mid_series_df.empty:
     
         mid_df = mid_series_df.dropna()
-        highlight_ts = pd.to_datetime(book_time, utc=True).floor("S")
-        window_start = highlight_ts - pd.Timedelta(seconds=5)
-        window_end = highlight_ts + pd.Timedelta(seconds=5)
         mid_line = (
             alt.Chart(mid_df)
             .mark_line()
@@ -318,12 +537,7 @@ def main() -> None:
             .mark_circle(color="red", size=80)
             .encode(x="timestamp:T", y="mid:Q")
         )
-        window_band = (
-            alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
-            .mark_rect(opacity=0.1, color="gray")
-            .encode(x="start:T", x2="end:T")
-        )
-        mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price Over Time")
+        mid_chart = (highlight_window + mid_line + highlight_point).properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
         st.altair_chart(mid_chart, use_container_width=True)
     # Depth and cumulative charts
     if plot_df.empty:
@@ -397,10 +611,10 @@ def main() -> None:
 
     with st.expander("Raw snapshots"):
         display_snapshots = _with_formatted_ts(snapshots, ["snapshot_timestamp"])
-        st.dataframe(display_snapshots, use_container_width=True)
+        st.dataframe(display_snapshots, width='stretch')
     with st.expander("Raw updates"):
         display_updates = _with_formatted_ts(updates, ["update_timestamp"])
-        st.dataframe(display_updates, use_container_width=True)
+        st.dataframe(display_updates, width='stretch')
 
 
 if __name__ == "__main__":

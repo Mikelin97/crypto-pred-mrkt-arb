@@ -136,39 +136,6 @@ class Fetcher:
                 df = df[df["book"].apply(self._book_has_volume)]
         return df
 
-    def fetch_tokens_for_series(
-        self,
-        series_id: str,
-        *,
-        series_table: str = "series",
-        events_table: str = "events",
-        markets_table: str = "markets",
-        tokens_table: str = "tokens",
-    ) -> pd.DataFrame:
-        series_table = self._table(series_table)
-        events_table = self._table(events_table)
-        markets_table = self._table(markets_table)
-        tokens_table = self._table(tokens_table)
-        sql = f"""
-            SELECT
-                s.series_id,
-                s.slug AS series_slug,
-                e.event_id,
-                e.slug AS event_slug,
-                e.title AS event_title,
-                m.market_id,
-                m.slug AS market_slug,
-                t.token_id,
-                t.outcome
-            FROM {series_table} s
-            JOIN {events_table} e ON e.series_id = s.series_id
-            JOIN {markets_table} m ON m.event_id = e.event_id
-            JOIN {tokens_table} t ON t.market_id = m.market_id
-            WHERE s.series_id = %(series_id)s
-            ORDER BY e.title, m.market_id, t.token_id
-        """
-        return self.query_df(sql, {"series_id": series_id})
-
     def fetch_updates(
         self,
         token_id: str,
@@ -204,6 +171,35 @@ class Fetcher:
             df = df[~df["price"].apply(lambda x: self._is_excluded_price(x, excluded_set))]
         return df
 
+    def fetch_chainlink_prices(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        limit: Optional[int] = None,
+        *,
+        chainlink_table: str = "chainlink_prices",
+    ) -> pd.DataFrame:
+        chainlink_table = self._table(chainlink_table)
+        sql = f"""
+            SELECT update_timestamp, value, symbol
+            FROM {chainlink_table}
+            WHERE lower(symbol) = lower(%(symbol)s)
+              AND update_timestamp BETWEEN %(start)s AND %(end)s
+            ORDER BY update_timestamp ASC
+        """
+        params = {"symbol": symbol, "start": start, "end": end}
+        if limit is not None:
+            sql += "\nLIMIT %(limit)s"
+            params["limit"] = limit
+        df = self.query_df(sql, params)
+        if df.empty:
+            return df
+        if "update_timestamp" in df:
+            df["update_timestamp"] = pd.to_datetime(df["update_timestamp"], utc=True)
+        df = df.dropna(subset=["value"])
+        return df
+
     def fetch_tokens_for_series(
         self,
         series_id: str,
@@ -212,11 +208,15 @@ class Fetcher:
         events_table: str = "events",
         markets_table: str = "markets",
         tokens_table: str = "tokens",
+        updates_table: str = "order_book_updates",
+        snapshots_table: str = "order_book_snapshots",
     ) -> pd.DataFrame:
         series_table = self._table(series_table)
         events_table = self._table(events_table)
         markets_table = self._table(markets_table)
         tokens_table = self._table(tokens_table)
+        updates_table = self._table(updates_table)
+        snapshots_table = self._table(snapshots_table)
         sql = f"""
             SELECT
                 s.series_id,
@@ -226,12 +226,24 @@ class Fetcher:
                 e.title AS event_title,
                 m.market_id,
                 m.slug AS market_slug,
-                t.token_id,
-                t.outcome
+                t.token_id AS token_id,
+                t.outcome,
+                coalesce(snapshots.snapshot_count, 0) AS snapshot_count,
+                coalesce(updates.update_count, 0) AS update_count
             FROM {series_table} s
             JOIN {events_table} e ON e.series_id = s.series_id
             JOIN {markets_table} m ON m.event_id = e.event_id
             JOIN {tokens_table} t ON t.market_id = m.market_id
+            LEFT JOIN (
+                SELECT token_id, count(*) AS snapshot_count
+                FROM {snapshots_table}
+                GROUP BY token_id
+            ) snapshots ON snapshots.token_id = t.token_id
+            LEFT JOIN (
+                SELECT token_id, count(*) AS update_count
+                FROM {updates_table}
+                GROUP BY token_id
+            ) updates ON updates.token_id = t.token_id
             WHERE s.series_id = %(series_id)s
             ORDER BY e.event_id, m.market_id, t.token_id
         """

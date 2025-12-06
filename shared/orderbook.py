@@ -115,6 +115,19 @@ class OrderBook:
     @property
     def mid(self):
         return (self.best_bid + self.best_ask) / 2 if self.bids and self.asks else np.nan
+    
+    @property 
+    def vmid(self):
+        """
+            Volume weighted midpoint to get market price
+        """
+
+        (bid_price, bid_size), (ask_price, ask_size) = self.top_market
+        if np.nan in (bid_price, bid_size, ask_price, ask_size):
+            # print(bid_price, bid_size, ask_price, ask_size, "ONE OF THESE FAILED")
+            return np.nan
+
+        return round((bid_price * bid_size + ask_price * ask_size) / (bid_size + ask_size), 4)
 
     @property
     def lwm(self):
