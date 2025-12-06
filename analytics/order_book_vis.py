@@ -29,7 +29,6 @@ EXCLUDED_PRICES = {0.99, 0.01}
 
 st.set_page_config(page_title="Order Book Visualizer", layout="wide")
 st.title("Order Book Visualizer")
-st.caption("Inspect ClickHouse order book snapshots and updates for a token, then scrub through time.")
 
 
 def _to_float(value: Any) -> float | None:
@@ -249,16 +248,19 @@ def main() -> None:
         return
 
     with st.sidebar.expander("Tokens"):
-        st.dataframe(tokens_df[["event_title", "event_slug", "market_slug", "token_id", "outcome"]], height=240, width='stretch')
+        st.dataframe(tokens_df[["event_title", "market_slug", "token_id", "outcome", "snapshot_count", "update_count"]], height=240, width='stretch')
 
     tokens_df = tokens_df.fillna("")
     tokens_df["label"] = tokens_df.apply(
-        lambda row: f"{row.get('event_title') or row.get('event_slug')} | {row.get('market_slug')} | {row.get('outcome')} ({row.get('token_id')})",
+        lambda row: f"{row.get('event_title').split('-')[1]} | {row.get('outcome')} | #snapshot: {row.get('snapshot_count')} #update: {row.get('update_count')}",
         axis=1,
     )
+    market_name = tokens_df["event_title"].iloc[0].split("-")[0] if "event_title" in tokens_df.columns else "Market"
     token_options = tokens_df.to_dict("records")
-    selected_token = st.sidebar.selectbox("Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
+    selected_token = st.sidebar.selectbox(f"{market_name}Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
     token_id = selected_token["token_id"] if isinstance(selected_token, dict) else None
+
+    st.write(f"__Event: {selected_token['event_title']} | Market Slug: {selected_token['market_slug']} | Token Id: {token_id}__")
 
     if not token_id:
         st.info("Select a token to load order book data.")
