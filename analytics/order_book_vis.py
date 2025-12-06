@@ -238,6 +238,13 @@ def _build_slider_options(timeline_series: list[pd.Series], granularity: str) ->
     return bucket_ends.to_list()
 
 
+def _sidebar_line(label: str, value: str) -> None:
+    st.sidebar.markdown(
+        f"<div style='word-break:break-word; white-space:normal'><strong>{label}:</strong><br>{value}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _start_from_market_slug(slug: str | None) -> datetime | None:
     """Extract the market start time from a slug formatted like btc-updown-15m-<epoch>."""
     if not slug:
@@ -285,8 +292,6 @@ def main() -> None:
     selected_token = st.sidebar.selectbox(f"{market_name}Token", options=token_options, format_func=lambda r: r["label"] if isinstance(r, dict) else str(r))
     token_id = selected_token["token_id"] if isinstance(selected_token, dict) else None
 
-    st.write(f"__Event: {selected_token['event_title']} | Market Slug: {selected_token['market_slug']} | Token Id: {token_id}__")
-
     if not token_id:
         st.info("Select a token to load order book data.")
         return
@@ -313,7 +318,6 @@ def main() -> None:
         st.warning("No data in the selected window. Expand the lookback or verify the token id.")
         return
 
-    st.subheader("Book playback")
     timeline_series = []
     if not snapshots.empty:
         timeline_series.append(snapshots["snapshot_timestamp"])
@@ -330,12 +334,17 @@ def main() -> None:
         return ts.strftime("%Y-%m-%d %H:%M:%S.%f")
 
     mid_series_df = _top_mid_series(snapshots)
-    book_time = st.select_slider(
+    book_time = st.sidebar.select_slider(
         "Book timestamp (UTC)",
         options=slider_options,
         value=slider_options[-1],
         format_func=_fmt_ts,
     )
+    with st.sidebar:
+        _sidebar_line("Event", selected_token["event_title"])
+        _sidebar_line("Market Slug", selected_token["market_slug"])
+        _sidebar_line("Token Id", token_id)
+        _sidebar_line("Outcome", selected_token["outcome"])
     highlight_ts = pd.to_datetime(book_time, utc=True).floor("s")
     window_start = highlight_ts - pd.Timedelta(seconds=5)
     window_end = highlight_ts + pd.Timedelta(seconds=5)
@@ -345,7 +354,6 @@ def main() -> None:
         .encode(x="start:T", x2="end:T")
     )
 
-    st.write(f"Selected timestamp: {_fmt_ts(book_time)} ({granularity_label})")
     book = build_book_at(book_time, snapshots, updates)
     plot_df = book_to_frame(book)
     mid_price = None
@@ -500,10 +508,6 @@ def main() -> None:
             )
         chainlink_chart = overlays.properties(height=300, title="Chainlink BTC/USD Price (start extended +5m)")
         st.altair_chart(chainlink_chart, use_container_width=True)
-        if strike_price_value is not None:
-            st.caption(f"Strike price (Chainlink at {strike_price_ts} UTC): {strike_price_value:.2f}")
-        if resolve_price_value is not None:
-            st.caption(f"Resolve price (+15m at {resolve_price_ts} UTC): {resolve_price_value:.2f}")
     else:
         st.info("No Chainlink BTC/USD price data available in this window.")
 
