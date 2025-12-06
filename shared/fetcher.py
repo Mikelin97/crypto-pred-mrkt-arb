@@ -171,6 +171,35 @@ class Fetcher:
             df = df[~df["price"].apply(lambda x: self._is_excluded_price(x, excluded_set))]
         return df
 
+    def fetch_chainlink_prices(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        limit: Optional[int] = None,
+        *,
+        chainlink_table: str = "chainlink_prices",
+    ) -> pd.DataFrame:
+        chainlink_table = self._table(chainlink_table)
+        sql = f"""
+            SELECT update_timestamp, value, symbol
+            FROM {chainlink_table}
+            WHERE lower(symbol) = lower(%(symbol)s)
+              AND update_timestamp BETWEEN %(start)s AND %(end)s
+            ORDER BY update_timestamp ASC
+        """
+        params = {"symbol": symbol, "start": start, "end": end}
+        if limit is not None:
+            sql += "\nLIMIT %(limit)s"
+            params["limit"] = limit
+        df = self.query_df(sql, params)
+        if df.empty:
+            return df
+        if "update_timestamp" in df:
+            df["update_timestamp"] = pd.to_datetime(df["update_timestamp"], utc=True)
+        df = df.dropna(subset=["value"])
+        return df
+
     def fetch_tokens_for_series(
         self,
         series_id: str,

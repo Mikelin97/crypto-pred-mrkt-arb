@@ -11,12 +11,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-
-PLAYBACK_GRANULARITY = {
-    "By tick": "tick",
-    "1 second buckets": "1s",
-    "5 second buckets": "5s",
-}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -24,7 +18,18 @@ if str(REPO_ROOT) not in sys.path:
 from shared.orderbook import OrderBook
 from shared.fetcher import Fetcher
 
+
+PLAYBACK_GRANULARITY = {
+    "By tick": "tick",
+    "1 second buckets": "1s",
+    "5 second buckets": "5s",
+}
+
+
+
+
 EXCLUDED_PRICES = {0.99, 0.01}
+CHAINLINK_BTC_SYMBOL = "btc/usd"
 
 
 st.set_page_config(page_title="Order Book Visualizer", layout="wide")
@@ -73,6 +78,14 @@ def fetch_updates(token_id: str, start: datetime, end: datetime, limit: int | No
         return pd.DataFrame()
     df = fetcher.fetch_updates(token_id, start, end, limit, excluded_prices=excluded_prices)
     return df
+
+
+@st.cache_data(show_spinner=False)
+def fetch_chainlink_prices(symbol: str, start: datetime, end: datetime, limit: int | None = None) -> pd.DataFrame:
+    fetcher = get_fetcher()
+    if fetcher is None:
+        return pd.DataFrame()
+    return fetcher.fetch_chainlink_prices(symbol, start, end, limit)
 
 
 @st.cache_data(show_spinner=False)
@@ -225,6 +238,17 @@ def _build_slider_options(timeline_series: list[pd.Series], granularity: str) ->
     return bucket_ends.to_list()
 
 
+def _start_from_market_slug(slug: str | None) -> datetime | None:
+    """Extract the market start time from a slug formatted like btc-updown-15m-<epoch>."""
+    if not slug:
+        return None
+    try:
+        epoch = int(slug.removesuffix(".jsonl").split("-")[-1])
+    except (ValueError, AttributeError):
+        return None
+    return pd.to_datetime(epoch, unit="s", utc=True)
+
+
 def main() -> None:
     fetcher = get_fetcher()
     if fetcher is None:
@@ -251,6 +275,7 @@ def main() -> None:
         st.dataframe(tokens_df[["event_title", "market_slug", "token_id", "outcome", "snapshot_count", "update_count"]], height=240, width='stretch')
 
     tokens_df = tokens_df.fillna("")
+    tokens_df = tokens_df[(tokens_df["snapshot_count"] > 0) | (tokens_df["update_count"] > 0)]
     tokens_df["label"] = tokens_df.apply(
         lambda row: f"{row.get('event_title').split('-')[1]} | {row.get('outcome')} | #snapshot: {row.get('snapshot_count')} #update: {row.get('update_count')}",
         axis=1,
@@ -273,12 +298,16 @@ def main() -> None:
 
     end_time = max_ts
     start_time = min_ts if min_ts else end_time
+    slug_start_time = _start_from_market_slug(selected_token.get("market_slug"))
+    strike_reference_time = slug_start_time if slug_start_time is not None else start_time
+    chainlink_start_time = strike_reference_time - timedelta(minutes=5)
 
     st.caption(f"Data available from {min_ts} to {max_ts} (UTC)")
 
     excluded_prices = EXCLUDED_PRICES if exclude_guard else None
     snapshots = fetch_snapshots(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
     updates = fetch_updates(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
+    chainlink_prices_df = fetch_chainlink_prices(CHAINLINK_BTC_SYMBOL, chainlink_start_time, end_time)
 
     if snapshots.empty and updates.empty:
         st.warning("No data in the selected window. Expand the lookback or verify the token id.")
@@ -307,6 +336,14 @@ def main() -> None:
         value=slider_options[-1],
         format_func=_fmt_ts,
     )
+    highlight_ts = pd.to_datetime(book_time, utc=True).floor("s")
+    window_start = highlight_ts - pd.Timedelta(seconds=5)
+    window_end = highlight_ts + pd.Timedelta(seconds=5)
+    highlight_window = (
+        alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
+        .mark_rect(opacity=0.1, color="gray")
+        .encode(x="start:T", x2="end:T")
+    )
 
     st.write(f"Selected timestamp: {_fmt_ts(book_time)} ({granularity_label})")
     book = build_book_at(book_time, snapshots, updates)
@@ -314,11 +351,111 @@ def main() -> None:
     mid_price = None
     if book.bids and book.asks:
         mid_price = book.vmid
-    
-    if mid_price is None: 
+
+    if mid_price is None:
         mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
-        book_time_floor = pd.to_datetime(book_time, utc=True).floor("s")
-        mid_price = mid_lookup.get(book_time_floor)
+        mid_price = mid_lookup.get(highlight_ts)
+
+    # Chainlink BTC/USD price with the same highlight window
+    if not chainlink_prices_df.empty:
+        cl_df = (
+            chainlink_prices_df.rename(columns={"update_timestamp": "timestamp", "value": "price"})
+            .dropna(subset=["price"])
+            .sort_values("timestamp")
+        )
+        price_at_ts = None
+        upto_highlight = cl_df[cl_df["timestamp"] <= highlight_ts]
+        if not upto_highlight.empty:
+            price_at_ts = upto_highlight.iloc[-1]["price"]
+
+        strike_ts = pd.to_datetime(strike_reference_time, utc=True)
+        strike_row = None
+        strike_after = cl_df[cl_df["timestamp"] >= strike_ts]
+        if not strike_after.empty:
+            strike_row = strike_after.iloc[0]
+        else:
+            strike_before = cl_df[cl_df["timestamp"] <= strike_ts]
+            if not strike_before.empty:
+                strike_row = strike_before.iloc[-1]
+        strike_price_value = strike_row["price"] if strike_row is not None else None
+        strike_price_ts = strike_row["timestamp"] if strike_row is not None else strike_ts
+
+        price_min = cl_df["price"].min()
+        price_max = cl_df["price"].max()
+        price_span = price_max - price_min
+        pad = max(price_span * 0.1, max(abs(price_max), 1) * 0.0005)
+        y_domain = [price_min - pad, price_max + pad]
+
+        warmup_band = (
+            alt.Chart(pd.DataFrame({"start": [chainlink_start_time], "end": [strike_reference_time]}))
+            .mark_rect(opacity=0.08, color="#b0c4de")
+            .encode(x="start:T", x2="end:T")
+        )
+
+        strike_text = (
+            f"{strike_price_value:.2f}"
+            if strike_price_value is not None and not pd.isna(strike_price_value)
+            else "—"
+        )
+        highlight_text = f"{price_at_ts:.2f}" if price_at_ts is not None and not pd.isna(price_at_ts) else "—"
+        delta_price = None
+        if (
+            strike_price_value is not None
+            and price_at_ts is not None
+            and not pd.isna(strike_price_value)
+            and not pd.isna(price_at_ts)
+        ):
+            delta_price = price_at_ts - strike_price_value
+        strike_label_ts = None
+        try:
+            strike_label_ts = (
+                strike_price_ts.tz_convert("UTC") if hasattr(strike_price_ts, "tz_convert") else strike_price_ts
+            )
+        except Exception:
+            strike_label_ts = strike_price_ts
+        strike_label = "Strike price"
+        if strike_label_ts is not None and not pd.isna(strike_label_ts):
+            strike_label = f"Strike price ({strike_label_ts.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+        price_summary = st.columns(2)
+        with price_summary[0]:
+            st.metric(strike_label, strike_text)
+        with price_summary[1]:
+            st.metric("Price at selection", highlight_text, delta=None if delta_price is None else f"{delta_price:+.2f}")
+
+        chainlink_line = (
+            alt.Chart(cl_df)
+            .mark_line(color="#f4a261")
+            .encode(
+                x=alt.X("timestamp:T", title="Time"),
+                y=alt.Y("price:Q", title="Chainlink BTC/USD Price", scale=alt.Scale(domain=y_domain, zero=False)),
+                tooltip=["timestamp:T", "price:Q"],
+            )
+        )
+        overlays = warmup_band + highlight_window + chainlink_line
+        if strike_price_value is not None:
+            strike_rule = (
+                alt.Chart(pd.DataFrame({"price": [strike_price_value]}))
+                .mark_rule(color="#264653", strokeDash=[6, 3])
+                .encode(y="price:Q")
+            )
+            overlays = overlays + strike_rule
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [strike_price_ts], "price": [strike_price_value]}))
+                .mark_circle(color="#264653", size=70)
+                .encode(x="timestamp:T", y="price:Q")
+            )
+        if price_at_ts is not None:
+            overlays = overlays + (
+                alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "price": [price_at_ts]}))
+                .mark_circle(color="#e76f51", size=80)
+                .encode(x="timestamp:T", y="price:Q")
+            )
+        chainlink_chart = overlays.properties(height=300, title="Chainlink BTC/USD Price (start extended +5m)")
+        st.altair_chart(chainlink_chart, use_container_width=True)
+        if strike_price_value is not None:
+            st.caption(f"Strike price (Chainlink at {strike_price_ts} UTC): {strike_price_value:.2f}")
+    else:
+        st.info("No Chainlink BTC/USD price data available in this window.")
 
 
     metrics = st.columns(3)
@@ -336,9 +473,6 @@ def main() -> None:
     if not mid_series_df.empty:
     
         mid_df = mid_series_df.dropna()
-        highlight_ts = pd.to_datetime(book_time, utc=True).floor("s")
-        window_start = highlight_ts - pd.Timedelta(seconds=5)
-        window_end = highlight_ts + pd.Timedelta(seconds=5)
         mid_line = (
             alt.Chart(mid_df)
             .mark_line()
@@ -353,12 +487,7 @@ def main() -> None:
             .mark_circle(color="red", size=80)
             .encode(x="timestamp:T", y="mid:Q")
         )
-        window_band = (
-            alt.Chart(pd.DataFrame({"start": [window_start], "end": [window_end]}))
-            .mark_rect(opacity=0.1, color="gray")
-            .encode(x="start:T", x2="end:T")
-        )
-        mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
+        mid_chart = (highlight_window + mid_line + highlight_point).properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
         st.altair_chart(mid_chart, use_container_width=True)
     # Depth and cumulative charts
     if plot_df.empty:
