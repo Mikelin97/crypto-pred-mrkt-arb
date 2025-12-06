@@ -325,13 +325,15 @@ class TransformWriter:
                 "INSERT INTO "
                 f"{self._table_chainlink} "
                 "(ingested_at, source, symbol, value, full_accuracy_value, update_timestamp, send_timestamp, arrival_timestamp, raw_payload) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                "ON CONFLICT (symbol, value, update_timestamp) DO NOTHING"
             ),
             self._table_binance: (
                 "INSERT INTO "
                 f"{self._table_binance} "
                 "(ingested_at, source, symbol, value, full_accuracy_value, update_timestamp, send_timestamp, arrival_timestamp, raw_payload) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                "ON CONFLICT (symbol, value, update_timestamp) DO NOTHING"
             ),
         }
 
