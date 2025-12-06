@@ -12,6 +12,11 @@ import streamlit as st
 import altair as alt
 
 
+PLAYBACK_GRANULARITY = {
+    "By tick": "tick",
+    "1 second buckets": "1s",
+    "5 second buckets": "5s",
+}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -85,7 +90,7 @@ def _top_mid_series(snapshots: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp", "mid"])
     records = []
     for ts, group in snapshots.groupby("snapshot_timestamp"):
-        ts_floor = pd.to_datetime(ts, utc=True).floor("S")
+        ts_floor = pd.to_datetime(ts, utc=True).floor("s")
         bid = group[group["side"] == "bid"]
         ask = group[group["side"] == "ask"]
         if bid.empty or ask.empty:
@@ -103,7 +108,7 @@ def _top_mid_series(snapshots: pd.DataFrame) -> pd.DataFrame:
             continue
         if bid_s <= 0 or ask_s <= 0:
             continue
-        mid = (bid_p * ask_s + ask_p * bid_s) / (bid_s + ask_s)
+        mid = round((bid_p * ask_s + ask_p * bid_s) / (bid_s + ask_s), 4)
         records.append({"timestamp": ts_floor, "mid": mid})
     if not records:
         return pd.DataFrame(columns=["timestamp", "mid"])
@@ -205,6 +210,22 @@ def _format_book_for_display(book: Any, *, max_levels: int = 5) -> str:
     return " | ".join(parts)
 
 
+def _build_slider_options(timeline_series: list[pd.Series], granularity: str) -> list[datetime]:
+    """Build slider positions based on chosen playback granularity."""
+    if not timeline_series:
+        return []
+    all_times = pd.concat(timeline_series).dropna()
+    if all_times.empty:
+        return []
+    if granularity == "tick":
+        return all_times.drop_duplicates().sort_values().to_list()
+    freq = "1s" if granularity == "1s" else "5s"
+    bucket_starts = all_times.dt.floor(freq)
+    unique_starts = bucket_starts.drop_duplicates().sort_values()
+    bucket_ends = unique_starts + pd.Timedelta(freq) - pd.Timedelta(microseconds=1)
+    return bucket_ends.to_list()
+
+
 def main() -> None:
     fetcher = get_fetcher()
     if fetcher is None:
@@ -214,6 +235,13 @@ def main() -> None:
     with st.sidebar:
         series_id = st.text_input("Series ID", value="10192", help="Series id to expand into tokens")
         exclude_guard = st.checkbox("Exclude 0.99 / 0.01", value=True)
+        granularity_label = st.radio(
+            "Book playback granularity",
+            list(PLAYBACK_GRANULARITY.keys()),
+            index=0,
+            help="Choose how the playback slider advances through the book timeline.",
+        )
+        playback_granularity = PLAYBACK_GRANULARITY[granularity_label]
 
     tokens_df = fetch_tokens_for_series(series_id) if series_id else pd.DataFrame()
     if tokens_df.empty:
@@ -221,7 +249,7 @@ def main() -> None:
         return
 
     with st.sidebar.expander("Tokens"):
-        st.dataframe(tokens_df[["event_title", "event_slug", "market_slug", "token_id", "outcome"]], height=240, use_container_width=True)
+        st.dataframe(tokens_df[["event_title", "event_slug", "market_slug", "token_id", "outcome"]], height=240, width='stretch')
 
     tokens_df = tokens_df.fillna("")
     tokens_df["label"] = tokens_df.apply(
@@ -261,8 +289,9 @@ def main() -> None:
     if not updates.empty:
         timeline_series.append(updates["update_timestamp"])
     if timeline_series:
-        all_times = pd.concat(timeline_series).dropna().drop_duplicates().sort_values()
-        slider_options = all_times.tolist()
+        slider_options = _build_slider_options(timeline_series, playback_granularity)
+        if not slider_options:
+            slider_options = [start_time, end_time]
     else:
         slider_options = [start_time, end_time]
 
@@ -277,14 +306,18 @@ def main() -> None:
         format_func=_fmt_ts,
     )
 
-    st.write(f"Selected timestamp: {_fmt_ts(book_time)}")
+    st.write(f"Selected timestamp: {_fmt_ts(book_time)} ({granularity_label})")
     book = build_book_at(book_time, snapshots, updates)
     plot_df = book_to_frame(book)
-    mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
-    book_time_floor = pd.to_datetime(book_time, utc=True).floor("S")
-    mid_price = mid_lookup.get(book_time_floor)
-    if mid_price is None and (book.bids and book.asks):
-        mid_price = book.mid
+    mid_price = None
+    if book.bids and book.asks:
+        mid_price = book.vmid
+    
+    if mid_price is None: 
+        mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
+        book_time_floor = pd.to_datetime(book_time, utc=True).floor("s")
+        mid_price = mid_lookup.get(book_time_floor)
+
 
     metrics = st.columns(3)
     best_bid = book.best_bid if book.bids else None
@@ -301,7 +334,7 @@ def main() -> None:
     if not mid_series_df.empty:
     
         mid_df = mid_series_df.dropna()
-        highlight_ts = pd.to_datetime(book_time, utc=True).floor("S")
+        highlight_ts = pd.to_datetime(book_time, utc=True).floor("s")
         window_start = highlight_ts - pd.Timedelta(seconds=5)
         window_end = highlight_ts + pd.Timedelta(seconds=5)
         mid_line = (
@@ -323,7 +356,7 @@ def main() -> None:
             .mark_rect(opacity=0.1, color="gray")
             .encode(x="start:T", x2="end:T")
         )
-        mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price Over Time")
+        mid_chart = (window_band + mid_line + highlight_point).properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
         st.altair_chart(mid_chart, use_container_width=True)
     # Depth and cumulative charts
     if plot_df.empty:
@@ -397,10 +430,10 @@ def main() -> None:
 
     with st.expander("Raw snapshots"):
         display_snapshots = _with_formatted_ts(snapshots, ["snapshot_timestamp"])
-        st.dataframe(display_snapshots, use_container_width=True)
+        st.dataframe(display_snapshots, width='stretch')
     with st.expander("Raw updates"):
         display_updates = _with_formatted_ts(updates, ["update_timestamp"])
-        st.dataframe(display_updates, use_container_width=True)
+        st.dataframe(display_updates, width='stretch')
 
 
 if __name__ == "__main__":
