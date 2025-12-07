@@ -1,6 +1,8 @@
-import argparse
 import json
+import os
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -8,13 +10,36 @@ import psycopg2
 import requests
 from psycopg2.extras import execute_values
 
-# Allow running as a script (python db/data_initialization/main.py) by
-# ensuring the repo root is on sys.path for the `useful_functions` import.
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
-from useful_functions import get_all_events
+
+
+def get_all_events(closed="false", tag_id='', max_events=None):
+
+    """
+        Get all market events with the option to filter based on a tag_id.
+        If max_events is provided, stop after collecting that many.
+    """
+    params = {
+        "closed": closed,
+        "limit": 500,
+        "offset": 0,
+        # 'tag_id': ''
+    }
+    if tag_id:
+        params["tag_id"] = tag_id
+
+    events = []
+    r = requests.get(url="https://gamma-api.polymarket.com/events", params=params)
+    response = r.json()
+    while response:
+        events += response
+        if max_events and len(events) >= max_events:
+            return events[:max_events]
+        params["offset"] += 500
+        r = requests.get(url="https://gamma-api.polymarket.com/events", params=params)
+        response = r.json()
+
+    return events
 
 
 # ---------- Shared helpers ----------
@@ -509,6 +534,31 @@ def attach_series_ids_to_events(events: List[Dict], series_data: List[Dict]) -> 
             ev["seriesId"] = event_to_series[str(eid)]
 
 
+def _parse_int(value: Optional[str]) -> Optional[int]:
+    """Try to parse an int from a string env var."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_truthy(value: Optional[str], default: bool = False) -> bool:
+    """Interpret common truthy strings (e.g., '1', 'true')."""
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _log(message: str, *, error: bool = False) -> None:
+    """Emit a log line with an ISO timestamp."""
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    prefix = "[data-init]"
+    target = sys.stderr if error else sys.stdout
+    print(f"{prefix} {timestamp} {message}", file=target, flush=True)
+
+
 # ---------- Orchestration ----------
 def populate_database(
     db_name: str,
@@ -551,37 +601,42 @@ def populate_database(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    db_name = os.environ.get("POSTGRES_DB", "postgres")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    user = os.environ.get("POSTGRES_USER", "postgres")
+    password = os.environ.get("POSTGRES_PASSWORD", "postgres")
+    closed = os.environ.get("CLOSED", "false")
+    limit = _parse_int(os.environ.get("LIMIT"))
 
-    parser.add_argument("--db_name", type=str, required=True)
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Postgres host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=str, default="5432", help="Postgres port (default: 5432)")
-    parser.add_argument("--user", type=str, default="postgres", help="Postgres user")
-    parser.add_argument("--password", type=str, default="postgres", help="Postgres password")
-    parser.add_argument(
-        "--closed",
-        type=str,
-        default="false",
-        help='Pass "true" to include closed events from the API.',
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limit the number of events to ingest (useful for test runs).",
-    )
+    # Scheduling controls
+    interval_seconds = _parse_int(os.environ.get("REFRESH_INTERVAL_SECONDS")) or 43200  # default 12h
+    run_once = _is_truthy(os.environ.get("RUN_ONCE")) or interval_seconds <= 0
 
-    args = parser.parse_args()
+    while True:
+        started_at = time.time()
+        _log(f"Starting load into {db_name}@{host}:{port} (limit={limit}, closed={closed})")
+        try:
+            populate_database(
+                db_name,
+                closed=closed,
+                limit=limit,
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+            )
+        except Exception as exc:
+            _log(f"ERROR during load: {exc}", error=True)
+        else:
+            elapsed = time.time() - started_at
+            _log(f"Load finished in {elapsed:.1f}s")
 
-    populate_database(
-        args.db_name,
-        closed=args.closed,
-        limit=args.limit,
-        host=args.host,
-        port=args.port,
-        user=args.user,
-        password=args.password,
-    )
+        if run_once:
+            break
+
+        _log(f"Sleeping for {interval_seconds} seconds before next run...")
+        time.sleep(interval_seconds)
 
 
 if __name__ == "__main__":
