@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Debezium connector restart script without taking a new initial snapshot.
+# Use after the initial connector has already snapshotted and offsets/replication slot are intact.
+
 set -e
 
 curl -X POST http://localhost:18083/connectors \
@@ -26,7 +29,7 @@ curl -X POST http://localhost:18083/connectors \
 
     "include.schema.changes": "false",
 
-    "snapshot.mode": "initial",
+    "snapshot.mode": "never",
     "snapshot.fetch.size": "5000",
     "snapshot.max.threads": "1",
 
