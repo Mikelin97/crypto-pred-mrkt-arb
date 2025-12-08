@@ -559,6 +559,29 @@ def _log(message: str, *, error: bool = False) -> None:
     print(f"{prefix} {timestamp} {message}", file=target, flush=True)
 
 
+# ---------- One-time init helpers ----------
+INIT_MARKER = Path(
+    os.environ.get("INIT_MARKER_PATH", "/app/db/data_initialization/.init_done")
+)
+
+
+def _resolve_closed_flag(default_closed: Optional[str]) -> Tuple[str, bool]:
+    """
+    Decide whether to request closed markets on this run.
+
+    If CLOSED is explicitly set, honor it. Otherwise, run closed="true" once
+    (when the marker file is absent) and closed="false" thereafter, even across
+    container restarts that keep the filesystem layer.
+    """
+    if default_closed is not None:
+        return default_closed, False
+
+    if INIT_MARKER.exists():
+        return "false", False
+
+    return "true", True
+
+
 # ---------- Orchestration ----------
 def populate_database(
     db_name: str,
@@ -606,7 +629,8 @@ def main() -> None:
     port = os.environ.get("POSTGRES_PORT", "5432")
     user = os.environ.get("POSTGRES_USER", "postgres")
     password = os.environ.get("POSTGRES_PASSWORD", "postgres")
-    closed = os.environ.get("CLOSED", "false")
+    closed_env = os.environ.get("CLOSED")
+    closed, should_mark_init = _resolve_closed_flag(closed_env)
     limit = _parse_int(os.environ.get("LIMIT"))
 
     # Scheduling controls
@@ -631,6 +655,12 @@ def main() -> None:
         else:
             elapsed = time.time() - started_at
             _log(f"Load finished in {elapsed:.1f}s")
+            if should_mark_init and not INIT_MARKER.exists():
+                INIT_MARKER.parent.mkdir(parents=True, exist_ok=True)
+                INIT_MARKER.touch()
+                # Switch to open markets only on subsequent runs
+                closed = "false"
+                should_mark_init = False
 
         if run_once:
             break
