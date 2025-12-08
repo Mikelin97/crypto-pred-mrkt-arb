@@ -10,3 +10,6 @@ CREATE TABLE order_book_updates(
     arrival_timestamp TIMESTAMPTZ(3) -- timestamp we got the update
 
 );
+
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uniq_orderbook_update
+ON order_book_updates (token_id, price, size, side, update_timestamp);
