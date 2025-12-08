@@ -10,3 +10,6 @@ CREATE TABLE IF NOT EXISTS chainlink_prices (
     arrival_timestamp TIMESTAMPTZ(3), -- timestamp we got the update
     raw_payload JSONB NOT NULL
 );
+
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uniq_chainlink
+ON chainlink_prices (symbol, value, update_timestamp);

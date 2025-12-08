@@ -314,12 +314,14 @@ class TransformWriter:
                 f"{self._table_order_book_updates} "
                 "(token_id, price, size, side, update_timestamp, send_timestamp, arrival_timestamp) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                "ON CONFLICT (token_id, price, size, side, update_timestamp) DO NOTHING"
             ),
             self._table_order_book_snapshots: (
                 "INSERT INTO "
                 f"{self._table_order_book_snapshots} "
                 "(token_id, book, side, top_price, top_size, snapshot_timestamp) "
                 "VALUES ($1, $2, $3, $4, $5, $6)"
+                "ON CONFLICT (token_id, side, snapshot_timestamp) DO NOTHING"
             ),
             self._table_chainlink: (
                 "INSERT INTO "

@@ -11,3 +11,6 @@ CREATE TABLE order_book_snapshots(
     side TEXT NOT NULL,
     snapshot_timestamp TIMESTAMPTZ(3) NOT NULL
 );
+
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uniq_orderbook_snapshot
+ON order_book_snapshots (token_id, side, snapshot_timestamp);
