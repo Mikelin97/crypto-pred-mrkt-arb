@@ -23,6 +23,9 @@ curl -X POST http://localhost:18083/connectors \
     "plugin.name": "pgoutput",
 
     "slot.drop.on.stop": "false",
+    "poll.interval.ms": "500",
+    "max.batch.size": "8192",
+    "max.queue.size": "65536",
 
     "include.schema.changes": "false",
 

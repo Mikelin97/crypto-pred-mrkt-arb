@@ -24,6 +24,12 @@ services:
       - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
       - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
       - KAFKA_NUM_PARTITIONS=3
+      # Delete data if the topic gets larger than 1GB (adjust as needed)
+      - KAFKA_LOG_RETENTION_BYTES=1073741824 
+      # Delete data older than 1 hour (instead of 7 days)
+      - KAFKA_LOG_RETENTION_HOURS=1
+      # Check for data to delete every 15 minutes (default is often higher)
+      - KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=900000
     ports:
       # Internal listener stays 9092 (for containers); external listener exposed on 19092 for host clients.
       - "19092:19092"
