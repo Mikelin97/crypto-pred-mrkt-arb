@@ -26,7 +26,7 @@ class Fetcher:
         secure: Optional[bool] = None,
     ) -> None:
         
-        self.host = host or os.getenv("CLICKHOUSE_HOST", "localhost")
+        self.host = host or os.getenv("CLICKHOUSE_HOST", "10.146.99.234")
         self.port = int(port or os.getenv("CLICKHOUSE_PORT", "8123"))
         self.username = username or os.getenv("CLICKHOUSE_USER") or os.getenv("CLICKHOUSE_USERNAME") or "default"
         self.password = password if password is not None else os.getenv("CLICKHOUSE_PASSWORD", "clickhouse")
@@ -169,6 +169,38 @@ class Fetcher:
         if excluded_prices:
             excluded_set = {float(x) for x in excluded_prices}
             df = df[~df["price"].apply(lambda x: self._is_excluded_price(x, excluded_set))]
+        return df
+
+    def fetch_trades(
+        self,
+        token_id: str,
+        start: datetime,
+        end: datetime,
+        limit: Optional[int] = None,
+        *,
+        trades_table: str = "trades",
+    ) -> pd.DataFrame:
+        trades_table = self._table(trades_table)
+        sql = f"""
+            SELECT trade_timestamp, side, size, price, transaction_hash, user_id, proxy_wallet, name, pseudonym
+            FROM {trades_table}
+            WHERE token_id = %(token_id)s
+              AND trade_timestamp BETWEEN %(start)s AND %(end)s
+            ORDER BY trade_timestamp ASC
+        """
+        params = {"token_id": token_id, "start": start, "end": end}
+        if limit is not None:
+            sql += "\nLIMIT %(limit)s"
+            params["limit"] = limit
+        df = self.query_df(sql, params)
+        if df.empty:
+            return df
+        if "trade_timestamp" in df:
+            df["trade_timestamp"] = pd.to_datetime(df["trade_timestamp"], utc=True)
+        df = df.dropna(subset=["trade_timestamp", "side", "size", "price"])
+        df["side"] = df["side"].astype(str).str.lower()
+        df["side"] = df["side"].replace({"bid": "buy", "ask": "sell"})
+        df = df[df["side"].isin(["buy", "sell"])]
         return df
 
     def fetch_chainlink_prices(

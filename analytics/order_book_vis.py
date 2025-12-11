@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Tuple
@@ -77,6 +78,15 @@ def fetch_updates(token_id: str, start: datetime, end: datetime, limit: int | No
     if fetcher is None:
         return pd.DataFrame()
     df = fetcher.fetch_updates(token_id, start, end, limit, excluded_prices=excluded_prices)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def fetch_trades(token_id: str, start: datetime, end: datetime, limit: int | None = None) -> pd.DataFrame:
+    fetcher = get_fetcher()
+    if fetcher is None:
+        return pd.DataFrame()
+    df = fetcher.fetch_trades(token_id, start, end, limit)
     return df
 
 
@@ -197,6 +207,117 @@ def _with_formatted_ts(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return formatted
 
 
+def _fifo_pnl(trades: pd.DataFrame, mark_price: float | None) -> tuple[float, float | pd.NA, float]:
+    """FIFO realized PnL plus mark-to-mid for remaining inventory; returns (realized, total_pnl, holding)."""
+    if trades.empty:
+        total = 0.0 if mark_price is not None else pd.NA
+        return 0.0, total, 0.0
+    queue: deque[tuple[float, float]] = deque()  # (qty, price), qty>0 long, qty<0 short
+    realized = 0.0
+    for _, row in trades.iterrows():
+        try:
+            qty = float(row["size"])
+            price = float(row["price"])
+        except (TypeError, ValueError):
+            continue
+        side = str(row["side"]).lower()
+        if side not in {"buy", "sell"} or qty <= 0:
+            continue
+        if side == "buy":
+            incoming = qty
+            # Offset existing shorts first
+            while incoming > 0 and queue and queue[0][0] < 0:
+                short_qty, short_price = queue[0]
+                offset = min(incoming, -short_qty)
+                realized += (short_price - price) * offset  # profit if covering below short price
+                short_qty += offset  # less negative
+                incoming -= offset
+                if abs(short_qty) < 1e-12:
+                    queue.popleft()
+                else:
+                    queue[0] = (short_qty, short_price)
+            if incoming > 1e-12:
+                queue.append((incoming, price))
+        else:  # sell
+            incoming = qty
+            while incoming > 0 and queue and queue[0][0] > 0:
+                long_qty, long_price = queue[0]
+                offset = min(incoming, long_qty)
+                realized += (price - long_price) * offset
+                long_qty -= offset
+                incoming -= offset
+                if long_qty <= 1e-12:
+                    queue.popleft()
+                else:
+                    queue[0] = (long_qty, long_price)
+            if incoming > 1e-12:
+                queue.append((-incoming, price))  # new short
+
+    holding = sum(q for q, _ in queue)
+    if mark_price is None or pd.isna(mark_price):
+        # If no mark and still holding, total PnL is unknown; realized is always known.
+        if abs(holding) > 1e-12:
+            return realized, pd.NA, holding
+        return realized, realized, holding
+
+    mark_component = sum((mark_price - price) * qty for qty, price in queue)
+    total = realized + mark_component
+    return realized, total, holding
+
+
+def _user_trade_summary(trades: pd.DataFrame, mark_price: float | None) -> pd.DataFrame:
+    """Aggregate trades by user, compute FIFO realized/total PnL and end-of-window holdings."""
+    if trades.empty:
+        return pd.DataFrame(columns=["user_id", "proxy_wallet", "name", "trade_count", "holding", "realized_pnl", "pnl"])
+    df = trades.dropna(subset=["trade_timestamp", "side", "size", "price"]).copy()
+    df["size"] = pd.to_numeric(df["size"], errors="coerce")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df = df.dropna(subset=["size", "price"])
+    df["display_name"] = df.get("name")
+    if "pseudonym" in df.columns:
+        df["display_name"] = df["display_name"].fillna(df["pseudonym"])
+    df["display_name"] = df["display_name"].fillna("")
+    df = df.sort_values(["trade_timestamp", "transaction_hash"], na_position="last")
+
+    rows = []
+    for (user_id, proxy_wallet, display_name), group in df.groupby(["user_id", "proxy_wallet", "display_name"], dropna=False):
+        trade_count = group["transaction_hash"].nunique()
+        realized, total_pnl, holding = _fifo_pnl(group, mark_price)
+        rows.append(
+            {
+                "user_id": "" if pd.isna(user_id) else str(user_id),
+                "proxy_wallet": "" if pd.isna(proxy_wallet) else str(proxy_wallet),
+                "name": "" if pd.isna(display_name) else str(display_name),
+                "trade_count": trade_count,
+                "holding": holding,
+                "realized_pnl": realized,
+                "pnl": total_pnl,
+            }
+        )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    if result["pnl"].notna().any():
+        result = result.sort_values("pnl", ascending=False)
+    elif result["realized_pnl"].notna().any():
+        result = result.sort_values("realized_pnl", ascending=False)
+    else:
+        result = result.sort_values("trade_count", ascending=False)
+    return result.reset_index(drop=True)
+
+
+def _pnl_color(val: Any) -> str:
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0:
+        return "background-color: #d4edda; color: #1b4332;"
+    if v < 0:
+        return "background-color: #f8d7da; color: #7f1d1d;"
+    return "background-color: #fdf7d9; color: #7c6f00;"
+
+
 def _format_book_for_display(book: Any, *, max_levels: int = 5) -> str:
     """Compact string representation of book levels for dataframe display."""
     if isinstance(book, str):
@@ -312,6 +433,7 @@ def main() -> None:
     excluded_prices = EXCLUDED_PRICES if exclude_guard else None
     snapshots = fetch_snapshots(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
     updates = fetch_updates(token_id, start_time, end_time, None, excluded_prices=excluded_prices)
+    trades_df = fetch_trades(token_id, start_time, end_time, None)
     chainlink_prices_df = fetch_chainlink_prices(CHAINLINK_BTC_SYMBOL, chainlink_start_time, end_time)
 
     if snapshots.empty and updates.empty:
@@ -323,6 +445,8 @@ def main() -> None:
         timeline_series.append(snapshots["snapshot_timestamp"])
     if not updates.empty:
         timeline_series.append(updates["update_timestamp"])
+    if not trades_df.empty and "trade_timestamp" in trades_df.columns:
+        timeline_series.append(trades_df["trade_timestamp"])
     if timeline_series:
         slider_options = _build_slider_options(timeline_series, playback_granularity)
         if not slider_options:
@@ -363,6 +487,10 @@ def main() -> None:
     if mid_price is None:
         mid_lookup = {row["timestamp"]: row["mid"] for _, row in mid_series_df.iterrows()}
         mid_price = mid_lookup.get(highlight_ts)
+
+    mark_price_for_pnl: float | None = mid_price
+    strike_price_value: float | None = None
+    resolve_price_value: float | None = None
 
     # Chainlink BTC/USD price with the same highlight window
     if not chainlink_prices_df.empty:
@@ -511,6 +639,14 @@ def main() -> None:
     else:
         st.info("No Chainlink BTC/USD price data available in this window.")
 
+    # Determine mark price for PnL using resolve vs strike and token outcome.
+    outcome = str(selected_token.get("outcome", "")).lower() if isinstance(selected_token, dict) else ""
+    if strike_price_value is not None and resolve_price_value is not None:
+        resolved_up = resolve_price_value > strike_price_value
+        if "up" in outcome:
+            mark_price_for_pnl = 1.0 if resolved_up else 0.0
+        elif "down" in outcome:
+            mark_price_for_pnl = 0.0 if resolved_up else 1.0
 
     metrics = st.columns(3)
     best_bid = book.best_bid if book.bids else None
@@ -536,12 +672,50 @@ def main() -> None:
                 tooltip=["timestamp:T", "mid:Q"],
             )
         )
-        highlight_point = (
-            alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "mid": [mid_price]}))
-            .mark_circle(color="red", size=80)
-            .encode(x="timestamp:T", y="mid:Q")
-        )
-        mid_chart = (highlight_window + mid_line + highlight_point).properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
+        highlight_point = None
+        if mid_price is not None:
+            highlight_point = (
+                alt.Chart(pd.DataFrame({"timestamp": [highlight_ts], "mid": [mid_price]}))
+                .mark_circle(color="red", size=80)
+                .encode(x="timestamp:T", y="mid:Q")
+            )
+
+        trades_plot = None
+        if not trades_df.empty:
+            trades_plot_df = trades_df.rename(columns={"trade_timestamp": "timestamp"}).copy()
+            trades_plot_df["abs_size"] = trades_plot_df["size"].abs()
+            trades_plot = (
+                alt.Chart(trades_plot_df)
+                .mark_circle(opacity=0.7)
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("price:Q", title="Price"),
+                    color=alt.Color(
+                        "side:N",
+                        scale=alt.Scale(domain=["buy", "sell"], range=["#2ecc71", "#e74c3c"]),
+                        title="Side",
+                    ),
+                    size=alt.Size(
+                        "abs_size:Q",
+                        scale=alt.Scale(range=[40, 400]),
+                        title="Size",
+                    ),
+                    tooltip=[
+                        alt.Tooltip("timestamp:T", title="Time"),
+                        alt.Tooltip("price:Q", title="Price"),
+                        alt.Tooltip("size:Q", title="Size"),
+                        alt.Tooltip("side:N", title="Side"),
+                        alt.Tooltip("transaction_hash:N", title="Tx Hash"),
+                    ],
+                )
+            )
+
+        mid_chart = highlight_window + mid_line
+        if highlight_point is not None:
+            mid_chart = mid_chart + highlight_point
+        if trades_plot is not None:
+            mid_chart = mid_chart + trades_plot
+        mid_chart = mid_chart.properties(height=300, title="Mid Price (Order Book Snapshot Only) Over Time")
         st.altair_chart(mid_chart, use_container_width=True)
     # Depth and cumulative charts
     if plot_df.empty:
@@ -609,8 +783,25 @@ def main() -> None:
                 .encode(x="price:Q")
             )
             st.altair_chart(cum_chart + mid_rule, use_container_width=True)
+    st.subheader("Trader summary")
+    if trades_df.empty:
+        st.info("No trades available for this token in the selected window.")
+    else:
+        summary_df = _user_trade_summary(trades_df, mark_price_for_pnl)
+        if summary_df.empty:
+            st.info("No trader summary to display.")
+        else:
+            formatters: dict[str, Any] = {
+                "trade_count": "{:.0f}".format,
+                "holding": (lambda x: f"{x:.4f}"),
+                "realized_pnl": (lambda x: f"{x:.4f}"),
+                "pnl": (lambda x: "—" if pd.isna(x) else f"{x:.4f}"),
+            }
+            styled = summary_df.style.format(formatters).applymap(_pnl_color, subset=["pnl"])
+            st.dataframe(styled, width='stretch')
+
     st.subheader("Loaded data")
-    stats = f"{len(snapshots)} snapshots, {len(updates)} updates between {start_time} and {end_time}."
+    stats = f"{len(snapshots)} snapshots, {len(updates)} updates, {len(trades_df)} trades between {start_time} and {end_time}."
     st.caption(stats)
 
     with st.expander("Raw snapshots"):
@@ -619,6 +810,9 @@ def main() -> None:
     with st.expander("Raw updates"):
         display_updates = _with_formatted_ts(updates, ["update_timestamp"])
         st.dataframe(display_updates, width='stretch')
+    with st.expander("Raw trades"):
+        display_trades = _with_formatted_ts(trades_df, ["trade_timestamp"])
+        st.dataframe(display_trades, width='stretch')
 
 
 if __name__ == "__main__":
